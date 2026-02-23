@@ -30,7 +30,12 @@
 - `Author`
 - `CreationDate`
 
-如缺失，再从文件名推断。
+若以上字段缺失，则补充读取 PDF 首页文本（本地离线）：
+- 优先 `pdftotext` 抽取第一页文本
+- 若可用则用 `mutool` 兜底
+- 从首页文本中推断标题、作者、日期（如 arXiv 行）
+
+仍缺失时，再从文件名推断。
 
 ## 主标题提取规则
 - 优先使用元数据标题。
@@ -149,10 +154,14 @@
   - Windows: `%APPDATA%\\ebook-renamer\\config.json`
 
 ## 外部工具处理
-脚本使用外部工具 `pdfinfo` 获取 PDF 元数据。
+脚本使用外部工具 `pdfinfo` 获取 PDF 元数据，并使用 `pdftotext`（可选 `mutool`）做首页文本补充解析。
 - 启动时先检查是否存在。
 - 若不存在，自动尝试用系统包管理器安装（如 `brew/apt/dnf/yum/pacman/zypper/choco/winget`）。
 - 安装失败时会给出错误提示，便于手工安装。
+
+预留参数（当前未实现具体逻辑）：
+- `--allow-ocr`：预留 OCR 回退开关（暂不执行 OCR）
+- `--allow-online`：预留联网补全开关（暂不联网）
 
 此外，GUI/TUI 所需 Python 包会按需检查并尝试自动安装（`pip --user`）：
 - GUI：`PySide6`、`PyQt6`（`tkinter` 为系统内置时不安装）

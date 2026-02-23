@@ -28,7 +28,7 @@ NOISE_PATTERNS = [
 
 WINDOWS_FILENAME_LIMIT = 255
 SAFE_FILENAME_LIMIT = 200
-APP_VERSION = "0.0.1"
+APP_VERSION = "0.1.0"
 GITHUB_URL = "https://github.com/etng/ebook-renamer"
 UPDATE_METADATA_URL = "https://github.com/etng/EbookRenamer/releases/latest/download/latest.json"
 APP_CONFIG_DIR_NAME = "ebook-renamer"
@@ -57,6 +57,12 @@ class RenamePlan:
     src: Path
     dst: str
     reason: dict[str, str]
+
+
+@dataclass
+class ScanOptions:
+    allow_ocr: bool = False
+    allow_online: bool = False
 
 
 def resource_base_dir() -> Path:
@@ -516,7 +522,106 @@ def author_from_filename(name_stem: str) -> str | None:
     return None
 
 
-def parse_pdf_meta(path: Path) -> BookMeta:
+def extract_pdf_first_page_text(path: Path) -> str:
+    cmds: list[list[str]] = []
+    if ensure_command("pdftotext"):
+        cmds.append(["pdftotext", "-f", "1", "-l", "1", str(path), "-"])
+    if shutil.which("mutool"):
+        cmds.append(["mutool", "draw", "-F", "txt", "-i", str(path), "1"])
+
+    for cmd in cmds:
+        proc = run(cmd)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout
+    return ""
+
+
+def is_likely_author_line(line: str) -> bool:
+    lowered = line.lower()
+    if "@" in line:
+        return False
+    if "based on research" in lowered or "collaboration" in lowered:
+        return False
+    words = re.findall(r"[A-Za-z][A-Za-z.\-']*", line)
+    if len(words) < 2 or len(words) > 12:
+        return False
+    upper_words = sum(1 for w in words if w[:1].isupper())
+    if upper_words < 2:
+        return False
+    return ("," in line) or (" and " in lowered) or (len(words) <= 4)
+
+
+def parse_pdf_probe_meta_from_text(text: str) -> BookMeta:
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if line:
+            lines.append(line)
+
+    if not lines:
+        return BookMeta()
+
+    date_text: str | None = None
+    for line in lines[:20]:
+        if line.lower().startswith("arxiv:"):
+            date_text = line
+            break
+
+    title: str | None = None
+    title_idx = -1
+    for idx, line in enumerate(lines[:60]):
+        lowered = line.lower()
+        if lowered.startswith(("arxiv:", "contents", "preface", "abstract")):
+            continue
+        if "@" in line:
+            continue
+        if re.fullmatch(r"[ivxlcdm]+", lowered):
+            continue
+        words = line.split()
+        if len(words) < 3 or len(words) > 24:
+            continue
+        if len(line) < 12:
+            continue
+        if is_likely_author_line(line):
+            continue
+        title = line
+        title_idx = idx
+        if idx + 1 < len(lines):
+            nxt = lines[idx + 1]
+            nxt_lower = nxt.lower()
+            if (
+                len(nxt.split()) >= 3
+                and len(nxt) <= 140
+                and not is_likely_author_line(nxt)
+                and not nxt_lower.startswith(("arxiv:", "contents", "preface", "abstract", "based on "))
+            ):
+                joiner = ": " if not title.endswith((".", ":", "-", "?", "!")) else " "
+                title = f"{title}{joiner}{nxt}"
+        break
+
+    author: str | None = None
+    start = title_idx + 1 if title_idx >= 0 else 0
+    for line in lines[start : start + 18]:
+        if is_likely_author_line(line):
+            author = line
+            break
+
+    return BookMeta(
+        title=title or None,
+        author=author or None,
+        date=date_text or None,
+    )
+
+
+def parse_pdf_text_probe(path: Path, options: ScanOptions | None = None) -> BookMeta:
+    _ = options
+    text = extract_pdf_first_page_text(path)
+    if not text:
+        return BookMeta()
+    return parse_pdf_probe_meta_from_text(text)
+
+
+def parse_pdf_meta(path: Path, options: ScanOptions | None = None) -> BookMeta:
     if not ensure_command("pdfinfo"):
         raise RuntimeError("pdfinfo unavailable and auto-install failed")
 
@@ -531,12 +636,21 @@ def parse_pdf_meta(path: Path) -> BookMeta:
         key, value = line.split(":", 1)
         data[key.strip()] = value.strip()
 
-    return BookMeta(
+    meta = BookMeta(
         title=data.get("Title") or None,
         author=data.get("Author") or None,
         date=data.get("CreationDate") or None,
         modified=data.get("ModDate") or None,
     )
+    if not meta.title or not meta.author or not meta.date:
+        probe = parse_pdf_text_probe(path, options)
+        if not meta.title and probe.title:
+            meta.title = probe.title
+        if not meta.author and probe.author:
+            meta.author = probe.author
+        if not meta.date and probe.date:
+            meta.date = probe.date
+    return meta
 
 
 def find_opf_path(epub_path: Path) -> str:
@@ -710,12 +824,12 @@ def validate_target_filename(name: str) -> str | None:
     return None
 
 
-def build_plans_for_directory(target: Path) -> list[RenamePlan]:
+def build_plans_for_directory(target: Path, options: ScanOptions | None = None) -> list[RenamePlan]:
     plans: list[RenamePlan] = []
     for file_path in collect_files(target):
         try:
             if file_path.suffix.lower() == ".pdf":
-                meta = parse_pdf_meta(file_path)
+                meta = parse_pdf_meta(file_path, options)
             else:
                 meta = parse_epub_meta(file_path)
         except Exception as e:
@@ -879,6 +993,7 @@ def run_qt_gui_workflow(
     app_title: str,
     app_icon: str | None,
     update_url: str,
+    scan_options: ScanOptions,
 ) -> int:
     if backend == "PySide6":
         from PySide6.QtCore import Qt, QUrl
@@ -930,6 +1045,7 @@ def run_qt_gui_workflow(
             self.row_sources: list[Path] = []
             self.repo_url = GITHUB_URL
             self.update_url = update_url
+            self.scan_options = scan_options
             self.packs = all_packs
             self.cfg = load_user_config()
             self.lang_code = self.resolve_initial_lang()
@@ -1113,7 +1229,7 @@ def run_qt_gui_workflow(
             self.current_dir = folder
             self.dir_input.setText(str(folder))
 
-            plans = build_plans_for_directory(folder)
+            plans = build_plans_for_directory(folder, self.scan_options)
             if not plans:
                 self.table.blockSignals(True)
                 self.table.setRowCount(0)
@@ -1291,6 +1407,8 @@ def main() -> int:
     parser.add_argument("--app-icon", default="", help="GUI app icon path (.ico/.icns/.png)")
     parser.add_argument("--check-update", action="store_true", help="Check latest version from release metadata and exit")
     parser.add_argument("--update-url", default=UPDATE_METADATA_URL, help="Update metadata URL (latest.json)")
+    parser.add_argument("--allow-ocr", action="store_true", help="Reserved flag: OCR fallback (not implemented yet)")
+    parser.add_argument("--allow-online", action="store_true", help="Reserved flag: online metadata lookup (not implemented yet)")
     parser.add_argument(
         "--ui",
         choices=["auto", "cli", "gui", "tui"],
@@ -1303,11 +1421,18 @@ def main() -> int:
         print("[ERROR] --gui and --tui cannot be used together.")
         return 1
 
+    if args.allow_ocr:
+        print("[INFO] --allow-ocr is enabled, but OCR fallback is not implemented yet.")
+    if args.allow_online:
+        print("[INFO] --allow-online is enabled, but online metadata lookup is not implemented yet.")
+
     if args.check_update:
         status, message = check_update_once(args.update_url, APP_VERSION)
         prefix = "[UPDATE]"
         print(f"{prefix} {message}")
         return 0 if status is not None else 1
+
+    scan_options = ScanOptions(allow_ocr=args.allow_ocr, allow_online=args.allow_online)
 
     if args.gui:
         args.ui = "gui"
@@ -1328,6 +1453,7 @@ def main() -> int:
                         app_title=args.app_title,
                         app_icon=args.app_icon or None,
                         update_url=args.update_url,
+                        scan_options=scan_options,
                     )
                 except Exception as e:
                     print(f"[WARN] Failed to launch GUI workflow: {e}. Falling back to TUI/CLI.")
@@ -1341,7 +1467,7 @@ def main() -> int:
         print(f"[ERROR] Invalid directory: {target}")
         return 1
 
-    plans = build_plans_for_directory(target)
+    plans = build_plans_for_directory(target, scan_options)
     if not plans:
         print("[INFO] No .epub/.pdf files found.")
         return 0
