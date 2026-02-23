@@ -8,6 +8,9 @@ ICON_PNG ?= $(ASSETS_DIR)/icon.png
 ICON_ICO ?= $(ASSETS_DIR)/icon.ico
 ICON_ICNS ?= $(ASSETS_DIR)/icon.icns
 MAC_BUNDLE ?= $(DIST_DIR)/$(APP_NAME)
+DIR ?= .
+APP_TITLE ?= Ebook Renamer
+RUN_ARGS ?=
 
 # Docker images commonly used for cross-platform PyInstaller builds.
 PYI_LINUX_IMAGE ?= cdrx/pyinstaller-linux:python3
@@ -20,7 +23,8 @@ GH_WINDOWS_WORKFLOW ?= build.yml
 GH_WINDOWS_ARTIFACT ?= EbookRenamer-windows
 
 .PHONY: help icon deps clean clean-build clean-dist \
-	ensure-pyinstaller build-macos build-linux build-windows build-windows-remote build-all package-release release relase
+	ensure-pyinstaller build-macos build-linux build-windows build-windows-remote build-all package-release release relase \
+	run-cli run-tui run-gui
 
 help:
 	@echo "Targets:"
@@ -34,6 +38,9 @@ help:
 	@echo "  make package-release Archive existing build outputs into release/"
 	@echo "  make release       Build all targets and collect release archives"
 	@echo "  make relase        Alias of make release"
+	@echo "  make run-cli       Run script in CLI preview mode"
+	@echo "  make run-tui       Run script in TUI preview mode"
+	@echo "  make run-gui       Run script in GUI mode"
 	@echo "  make clean         Remove build artifacts"
 
 icon:
@@ -143,6 +150,15 @@ release:
 	@$(MAKE) package-release
 
 relase: release
+
+run-cli:
+	$(PYTHON) "$(ENTRY)" --ui cli --dir "$(DIR)" $(RUN_ARGS)
+
+run-tui:
+	$(PYTHON) "$(ENTRY)" --tui --dir "$(DIR)" $(RUN_ARGS)
+
+run-gui:
+	$(PYTHON) "$(ENTRY)" --gui --dir "$(DIR)" --app-title "$(APP_TITLE)" $(RUN_ARGS)
 
 clean-build:
 	rm -rf "$(BUILD_DIR)"

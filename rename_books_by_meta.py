@@ -28,7 +28,7 @@ NOISE_PATTERNS = [
 
 WINDOWS_FILENAME_LIMIT = 255
 SAFE_FILENAME_LIMIT = 200
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 GITHUB_URL = "https://github.com/etng/ebook-renamer"
 UPDATE_METADATA_URL = "https://github.com/etng/EbookRenamer/releases/latest/download/latest.json"
 APP_CONFIG_DIR_NAME = "ebook-renamer"
@@ -361,6 +361,8 @@ def clean_text(text: str) -> str:
     value = text
     for p in NOISE_PATTERNS:
         value = re.sub(p, "", value, flags=re.IGNORECASE)
+    # Drop placeholder tokens from legacy filenames.
+    value = re.sub(r"\bUnknown(?:Year|Author)\b", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\([^)]*\)", "", value)
     value = re.sub(r"\s+", " ", value).strip(" ._-")
     return value
@@ -458,6 +460,23 @@ def title_word_count(text: str | None) -> int:
     return len(re.findall(r"[A-Za-z0-9]+", text))
 
 
+def normalize_title_for_compare(text: str) -> str:
+    value = text.lower()
+    value = re.sub(r"[_\-]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def has_edition_marker(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:\d+e|\d+(?:st|nd|rd|th)\s+edition|first\s+edition|second\s+edition|third\s+edition)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
 def choose_best_title(path: Path, meta_title: str | None) -> str:
     fallback = fallback_title_from_filename(path)
     if looks_like_bad_title(meta_title):
@@ -465,13 +484,21 @@ def choose_best_title(path: Path, meta_title: str | None) -> str:
 
     meta_main = main_title_only(meta_title or "")
     fallback_main = main_title_only(fallback)
+    meta_norm = normalize_title_for_compare(meta_main)
+    fallback_norm = normalize_title_for_compare(fallback_main)
+
+    # Prefer richer filename title when it carries explicit edition markers
+    # and metadata title does not.
+    if has_edition_marker(fallback_main) and not has_edition_marker(meta_main):
+        if fallback_norm.startswith(meta_norm):
+            return fallback_main
 
     # If metadata title is too short but filename contains a richer title that
     # starts with the same phrase, prefer the richer one.
     if (
         title_word_count(meta_main) <= 2
         and title_word_count(fallback_main) >= 4
-        and fallback_main.lower().startswith(meta_main.lower())
+        and fallback_norm.startswith(meta_norm)
     ):
         return fallback_main
 
@@ -519,7 +546,50 @@ def author_from_filename(name_stem: str) -> str | None:
         if len(tokens) >= 2:
             return f"{tokens[0]} {tokens[1]}"
         return raw
+
+    # Fallback: infer from last non-year segment after hyphen splits.
+    parts = [p.strip() for p in re.split(r"-+", name_stem) if p.strip()]
+    if parts:
+        idx = len(parts) - 1
+        if re.fullmatch(r"(?:19\d{2}|20\d{2}|2100|UnknownYear)", parts[idx], flags=re.IGNORECASE):
+            idx -= 1
+        if idx >= 0:
+            candidate = re.sub(r"[_\s]+", " ", parts[idx]).strip()
+            tokens = [t for t in candidate.split() if t]
+            if 1 <= len(tokens) <= 3:
+                if all(re.fullmatch(r"[A-Za-z][A-Za-z.'-]*", t) for t in tokens):
+                    if len(tokens) >= 2 and all(t[0].isupper() for t in tokens):
+                        return " ".join(tokens)
+                    if len(tokens) == 1 and len(tokens[0]) >= 4 and tokens[0][0].isupper():
+                        return tokens[0]
     return None
+
+
+def strip_author_from_title(title: str, author_text: str | None, year: str | None = None) -> str:
+    if not title or not author_text:
+        return title
+
+    author_token = normalize_file_token(author_text)
+    if not author_token:
+        return title
+
+    # Match common title tails/heads that duplicate author info from filenames.
+    author_pat = re.escape(author_token).replace(r"\_", r"[ _-]+")
+    sep = r"[\s_\-–—,:|/]*"
+    year_pat = re.escape(year) if year else r"(?:19\d{2}|20\d{2}|2100)"
+    patterns = [
+        rf"(?i){sep}{author_pat}(?:{sep}{year_pat})?\s*$",
+        rf"(?i){sep}{year_pat}{sep}{author_pat}\s*$",
+        rf"(?i)^\s*{author_pat}{sep}",
+    ]
+
+    cleaned = title
+    for pat in patterns:
+        cleaned = re.sub(pat, "", cleaned).strip(" _-–—,|:/")
+
+    if not cleaned:
+        return title
+    return cleaned
 
 
 def extract_pdf_first_page_text(path: Path) -> str:
@@ -709,25 +779,31 @@ def fallback_title_from_filename(path: Path) -> str:
 
 
 def build_new_name(path: Path, meta: BookMeta) -> tuple[str, dict[str, str]]:
-    title_raw = choose_best_title(path, meta.title)
-    title_abbr = abbreviate_title_phrases(title_raw)
-    title = normalize_file_token(title_abbr)
-
     author_raw = split_first_author(meta.author)
     if not author_raw:
-        author_raw = author_from_filename(path.stem) or "UnknownAuthor"
-    author = normalize_file_token(author_raw)
+        author_raw = author_from_filename(path.stem) or ""
+    author = normalize_file_token(author_raw) if author_raw else ""
 
     year = (
         extract_year(meta.date)
         or extract_year(meta.modified)
         or extract_year(path.stem)
-        or "UnknownYear"
+        or ""
     )
 
-    new_name = f"{title}-{author}-{year}{path.suffix.lower()}"
+    title_raw = choose_best_title(path, meta.title)
+    title_dedup = strip_author_from_title(title_raw, author_raw, year)
+    title_abbr = abbreviate_title_phrases(title_dedup)
+    title = normalize_file_token(title_abbr)
+
+    stem_parts = [title]
+    if author:
+        stem_parts.append(author)
+    if year:
+        stem_parts.append(year)
+    new_name = f"{'-'.join(stem_parts)}{path.suffix.lower()}"
     reason = {
-        "title": title_raw or "fallback(filename)",
+        "title": title_dedup or "fallback(filename)",
         "title_final": title,
         "title_len": str(len(title)),
         "author": author_raw,
@@ -743,6 +819,17 @@ def unique_name(target_dir: Path, desired_name: str) -> str:
     suffix = Path(desired_name).suffix
     n = 2
     while (target_dir / candidate).exists():
+        candidate = f"{base}-{n}{suffix}"
+        n += 1
+    return candidate
+
+
+def unique_name_with_reserved(target_dir: Path, desired_name: str, reserved: set[str]) -> str:
+    candidate = desired_name
+    base = Path(desired_name).stem
+    suffix = Path(desired_name).suffix
+    n = 2
+    while (target_dir / candidate).exists() or candidate.casefold() in reserved:
         candidate = f"{base}-{n}{suffix}"
         n += 1
     return candidate
@@ -826,6 +913,7 @@ def validate_target_filename(name: str) -> str | None:
 
 def build_plans_for_directory(target: Path, options: ScanOptions | None = None) -> list[RenamePlan]:
     plans: list[RenamePlan] = []
+    reserved_targets: set[str] = set()
     for file_path in collect_files(target):
         try:
             if file_path.suffix.lower() == ".pdf":
@@ -837,7 +925,11 @@ def build_plans_for_directory(target: Path, options: ScanOptions | None = None) 
             meta = BookMeta()
 
         desired, reason = build_new_name(file_path, meta)
-        final_name = unique_name(target, desired) if desired != file_path.name else desired
+        if desired == file_path.name:
+            final_name = desired
+        else:
+            final_name = unique_name_with_reserved(target, desired, reserved_targets)
+        reserved_targets.add(final_name.casefold())
         plans.append(RenamePlan(src=file_path, dst=final_name, reason=reason))
     return plans
 
@@ -947,44 +1039,528 @@ def render_rich_tui_preview(plans: list[RenamePlan]) -> None:
     Console().print(table)
 
 
-def render_textual_tui_preview(plans: list[RenamePlan]) -> None:
+def render_textual_tui_preview(
+    plans: list[RenamePlan],
+    app_title: str,
+    update_url: str,
+    current_dir: Path,
+    scan_options: ScanOptions,
+    run_app: bool = True,
+):
     from textual.app import App, ComposeResult
-    from textual.widgets import DataTable, Footer, Header
+    from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+    from textual.widgets import Button, DataTable, Input, Static, Tree
+
+    all_packs = load_language_packs()
+    fallback_pack = all_packs.get(DEFAULT_LANG, {})
 
     class PreviewApp(App):
-        CSS = "DataTable { height: 1fr; }"
-        BINDINGS = [("q", "quit", "Quit")]
+        CSS = """
+        #title { height: auto; padding: 1 1; text-style: bold; }
+        #path { height: auto; padding: 0 1 1 1; color: $text-muted; }
+        DataTable { height: 1fr; }
+        #actions { height: auto; align: center middle; padding: 1 1; }
+        #actions Button { margin: 0 1; width: auto; min-width: 8; }
+        .overlay {
+            layer: overlay;
+            width: 100%;
+            height: 100%;
+            align: center middle;
+            background: $background 75%;
+        }
+        .overlay_box {
+            width: auto;
+            min-width: 48;
+            max-width: 90;
+            height: auto;
+            max-height: 90%;
+            padding: 1 2;
+            border: round $panel;
+            background: $surface;
+        }
+        .message_box { min-width: 56; max-width: 96; }
+        .edit_box { min-width: 44; max-width: 70; }
+        .folder_box { min-width: 60; max-width: 100; max-height: 90%; }
+        .hidden { display: none; }
+        #message_title { padding: 0 0 1 0; text-style: bold; color: $text; }
+        #message_scroll { height: auto; max-height: 20; border: round $panel; }
+        #message_text { padding: 0 1; }
+        #edit_label { padding: 0 0 1 0; }
+        #edit_input { margin: 0 0 1 0; }
+        #folder_tree { height: 20; border: round $panel; margin: 0 0 1 0; }
+        #message_actions, #edit_actions { align: center middle; }
+        #folder_actions { align: center middle; }
+        #message_actions Button, #edit_actions Button, #folder_actions Button { width: auto; min-width: 8; margin: 0 1; }
+        """
+        BINDINGS = [
+            ("f", "choose_folder", "Folder"),
+            ("e", "edit_target", "Edit"),
+            ("a", "apply_rename", "Apply"),
+            ("u", "check_update", "Update"),
+            ("l", "switch_language", "Language"),
+            ("i", "show_about", "About"),
+            ("h", "show_help", "Help"),
+            ("q", "quit", "Exit"),
+        ]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.packs = all_packs
+            self.cfg = load_user_config()
+            self.lang_code = self.resolve_initial_lang()
+            self.current_dir = current_dir
+            self.plans = list(plans)
+            self.working_targets = [item.dst for item in self.plans]
+            self.editing_row = 0
+            self.folder_candidate: Path | None = None
+
+        def t(self, key: str, **kwargs: object) -> str:
+            pack = self.packs.get(self.lang_code, {})
+            template = pack.get(key) or fallback_pack.get(key) or key
+            try:
+                return template.format(**kwargs)
+            except Exception:
+                return template
+
+        def resolve_initial_lang(self) -> str:
+            user_lang = normalize_lang_code(str(self.cfg.get("lang", "")))
+            if user_lang in self.packs:
+                return user_lang
+            sys_lang = detect_system_language()
+            if sys_lang in self.packs:
+                return sys_lang
+            return DEFAULT_LANG
+
+        def next_lang(self) -> str:
+            codes = [c for c in LANG_DISPLAY_NAMES.keys() if c in self.packs]
+            if not codes:
+                return DEFAULT_LANG
+            if self.lang_code not in codes:
+                return codes[0]
+            idx = codes.index(self.lang_code)
+            return codes[(idx + 1) % len(codes)]
 
         def compose(self) -> ComposeResult:
-            yield Header()
-            yield DataTable()
-            yield Footer()
+            yield Static("", id="title")
+            yield Static("", id="path")
+            yield DataTable(id="table")
+            with Horizontal(id="actions"):
+                yield Button("", id="folder")
+                yield Button("", id="edit_target")
+                yield Button("", id="apply")
+                yield Button("", id="check_update")
+                yield Button("", id="language")
+                yield Button("", id="about")
+                yield Button("", id="help")
+                yield Button("Exit", id="exit")
+            with Container(classes="overlay hidden", id="message_overlay"):
+                with Vertical(classes="overlay_box message_box"):
+                    yield Static("", id="message_title")
+                    with VerticalScroll(id="message_scroll"):
+                        yield Static("", id="message_text")
+                    with Horizontal(id="message_actions"):
+                        yield Button("OK", id="message_ok")
+            with Container(classes="overlay hidden", id="edit_overlay"):
+                with Vertical(classes="overlay_box edit_box"):
+                    yield Static("", id="edit_label")
+                    yield Input("", id="edit_input")
+                    with Horizontal(id="edit_actions"):
+                        yield Button("", id="edit_save")
+                        yield Button("", id="edit_cancel")
+            with Container(classes="overlay hidden", id="folder_overlay"):
+                with Vertical(classes="overlay_box folder_box"):
+                    yield Static("", id="folder_label")
+                    yield Tree("/", id="folder_tree")
+                    with Horizontal(id="folder_actions"):
+                        yield Button("", id="folder_open")
+                        yield Button("", id="folder_cancel")
 
-        def on_mount(self) -> None:
-            table = self.query_one(DataTable)
+        def refresh_table(self) -> None:
+            table = self.query_one("#table", DataTable)
+            row_count_before = table.row_count
+            current_row = table.cursor_row if row_count_before > 0 else 0
+            table.clear(columns=True)
             table.cursor_type = "row"
-            table.add_columns("Current", "Target", "Title Len", "Name Len", "Note")
-            for item in plans:
+            table.add_columns(
+                self.t("table_current"),
+                self.t("table_target"),
+                self.t("table_title_len"),
+                self.t("table_name_len"),
+                self.t("table_note"),
+            )
+            for idx, item in enumerate(self.plans):
+                dst_name = self.working_targets[idx]
                 note = ""
                 try:
-                    dst_len = int(item.reason["name_len"])
+                    dst_len = len(dst_name)
                 except ValueError:
-                    dst_len = len(item.dst)
+                    dst_len = len(dst_name)
                 if dst_len > WINDOWS_FILENAME_LIMIT:
                     note = ">255"
                 elif dst_len > SAFE_FILENAME_LIMIT:
                     note = ">200"
-                elif item.src.name == item.dst:
-                    note = "same"
+                elif item.src.name == dst_name:
+                    note = self.t("note_same")
                 table.add_row(
                     item.src.name,
-                    item.dst,
-                    item.reason["title_len"],
-                    item.reason["name_len"],
+                    dst_name,
+                    str(calc_title_len_from_target(dst_name)),
+                    str(len(dst_name)),
                     note,
                 )
+            if table.row_count > 0:
+                safe_row = min(max(current_row, 0), table.row_count - 1)
+                table.move_cursor(row=safe_row, column=1)
 
-    PreviewApp().run()
+        def show_message(self, title: str, message: str) -> None:
+            self.query_one("#message_title", Static).update(title)
+            self.query_one("#message_text", Static).update(message)
+            self.query_one("#message_overlay", Container).remove_class("hidden")
+
+        def hide_message(self) -> None:
+            self.query_one("#message_overlay", Container).add_class("hidden")
+
+        def show_edit_overlay(self) -> None:
+            table = self.query_one("#table", DataTable)
+            if table.row_count == 0:
+                self.show_message(self.t("dialog_noop_title"), self.t("dialog_noop_body"))
+                return
+            self.editing_row = min(max(table.cursor_row, 0), table.row_count - 1)
+            current_name = self.working_targets[self.editing_row]
+            self.query_one("#edit_label", Static).update(
+                f"{self.t('table_target')} (row {self.editing_row + 1})"
+            )
+            edit_input = self.query_one("#edit_input", Input)
+            edit_input.value = current_name
+            self.query_one("#edit_overlay", Container).remove_class("hidden")
+            edit_input.focus()
+
+        def hide_edit_overlay(self) -> None:
+            self.query_one("#edit_overlay", Container).add_class("hidden")
+
+        def show_folder_overlay(self) -> None:
+            self.query_one("#folder_label", Static).update(self.t("dialog_folder_select_title"))
+            self.query_one("#folder_overlay", Container).remove_class("hidden")
+            self.folder_candidate = self.current_dir
+            self.prepare_folder_tree()
+
+        def hide_folder_overlay(self) -> None:
+            self.query_one("#folder_overlay", Container).add_class("hidden")
+            self.folder_candidate = None
+
+        def add_placeholder(self, node: object) -> None:
+            node.add("...", data="__placeholder__", allow_expand=False)
+
+        def iter_subdirs(self, path: Path) -> list[Path]:
+            children: list[Path] = []
+            try:
+                for p in path.iterdir():
+                    if p.is_dir():
+                        children.append(p)
+            except Exception:
+                return []
+            return sorted(children, key=lambda x: x.name.lower())
+
+        def has_subdirs(self, path: Path) -> bool:
+            try:
+                for p in path.iterdir():
+                    if p.is_dir():
+                        return True
+            except Exception:
+                return False
+            return False
+
+        def populate_tree_node(self, node: object) -> None:
+            data = getattr(node, "data", None)
+            if not isinstance(data, Path):
+                return
+            node.remove_children()
+            children = self.iter_subdirs(data)
+            if not children:
+                node.allow_expand = False
+                return
+            node.allow_expand = True
+            for child in children:
+                child_node = node.add(child.name or str(child), data=child, allow_expand=True)
+                if self.has_subdirs(child):
+                    self.add_placeholder(child_node)
+                else:
+                    child_node.allow_expand = False
+
+        def get_root_path(self) -> Path:
+            if os.name == "nt":
+                anchor = Path(self.current_dir.anchor or Path.cwd().anchor or "C:\\")
+                return anchor
+            return Path("/")
+
+        def expand_tree_to_path(self, tree: object, target: Path) -> None:
+            node = tree.root
+            if not isinstance(node.data, Path):
+                return
+            current = node.data
+            target = target.resolve()
+            if os.name == "nt":
+                if current.drive.lower() != target.drive.lower():
+                    return
+            else:
+                if not str(target).startswith(str(current)):
+                    return
+            while True:
+                if current == target:
+                    tree.select_node(node)
+                    break
+                try:
+                    rel = target.relative_to(current)
+                except Exception:
+                    break
+                if not rel.parts:
+                    tree.select_node(node)
+                    break
+                next_part = rel.parts[0]
+                self.populate_tree_node(node)
+                found = None
+                for child in node.children:
+                    child_data = getattr(child, "data", None)
+                    if isinstance(child_data, Path) and child_data.name == next_part:
+                        found = child
+                        break
+                if not found:
+                    tree.select_node(node)
+                    break
+                node.expand()
+                node = found
+                current = node.data
+            node.expand()
+
+        def prepare_folder_tree(self) -> None:
+            tree = self.query_one("#folder_tree", Tree)
+            root_path = self.get_root_path()
+            root = tree.root
+            root.set_label(str(root_path))
+            root.data = root_path
+            root.allow_expand = True
+            root.remove_children()
+            self.add_placeholder(root)
+            self.populate_tree_node(root)
+            root.expand()
+            self.expand_tree_to_path(tree, self.current_dir)
+            tree.focus()
+
+        def apply_edit(self) -> None:
+            new_value = self.query_one("#edit_input", Input).value.strip()
+            err_code = validate_target_filename(new_value)
+            if err_code:
+                self.show_message(
+                    self.t("dialog_invalid_targets_title"),
+                    self.t("error_row_message", row=self.editing_row + 1, message=self.t(f"error_{err_code}")),
+                )
+                return
+            # Prevent duplicate targets inside current preview set.
+            for idx, value in enumerate(self.working_targets):
+                if idx != self.editing_row and value.casefold() == new_value.casefold():
+                    self.show_message(
+                        self.t("dialog_invalid_targets_title"),
+                        self.t("error_row_duplicate", row=self.editing_row + 1, name=new_value),
+                    )
+                    return
+            self.working_targets[self.editing_row] = new_value
+            self.hide_edit_overlay()
+            self.refresh_table()
+
+        def apply_folder_change(self, path: Path) -> None:
+            if not path.exists() or not path.is_dir():
+                self.show_message(self.t("dialog_invalid_folder_title"), self.t("dialog_invalid_folder_body", path=path))
+                return
+            new_plans = build_plans_for_directory(path, scan_options)
+            self.current_dir = path
+            self.plans = new_plans
+            self.working_targets = [item.dst for item in self.plans]
+            self.hide_folder_overlay()
+            self.refresh_table()
+            self.refresh_texts()
+            if not self.plans:
+                self.show_message(self.t("status_no_files"), self.t("dialog_no_files_in_folder", path=path))
+
+        def refresh_texts(self) -> None:
+            def with_shortcut(key: str, label: str) -> str:
+                return f"{key.upper()} {label}"
+
+            def trim_label(text: str) -> str:
+                return text.rstrip(":： ").strip()
+
+            def short(key: str, fallback: str) -> str:
+                value = self.t(key).strip()
+                return value if value and value != key else fallback
+
+            self.title = self.t("window_title", app_title=app_title)
+            self.query_one("#title", Static).update(self.t("window_title", app_title=app_title))
+            self.query_one("#path", Static).update(str(self.current_dir))
+            self.query_one("#folder", Button).label = with_shortcut("F", short("button_folder_short", self.t("button_choose_folder")))
+            self.query_one("#edit_target", Button).label = with_shortcut("E", short("button_edit_short", self.t("button_edit_target")))
+            self.query_one("#apply", Button).label = with_shortcut("A", short("button_apply_short", self.t("button_apply")))
+            self.query_one("#check_update", Button).label = with_shortcut("U", short("button_update_short", self.t("button_check_update")))
+            self.query_one("#about", Button).label = with_shortcut("I", short("button_about_short", self.t("button_about")))
+            self.query_one("#help", Button).label = with_shortcut("H", short("button_help_short", self.t("menu_help")))
+            self.query_one("#language", Button).label = with_shortcut("L", short("button_language_short", trim_label(self.t("label_language"))))
+            self.query_one("#exit", Button).label = with_shortcut("Q", short("button_exit_short", "Exit"))
+            self.query_one("#message_ok", Button).label = self.t("dialog_close")
+            self.query_one("#edit_save", Button).label = self.t("button_apply")
+            self.query_one("#edit_cancel", Button).label = self.t("dialog_close")
+            self.query_one("#folder_open", Button).label = self.t("button_choose_folder")
+            self.query_one("#folder_cancel", Button).label = self.t("dialog_close")
+
+        def confirm_folder_selection(self) -> None:
+            selected = self.folder_candidate or self.current_dir
+            self.apply_folder_change(selected.resolve())
+
+        def on_mount(self) -> None:
+            self.refresh_table()
+            self.refresh_texts()
+
+        def collect_pairs(self) -> tuple[list[tuple[Path, str]], str | None]:
+            pairs: list[tuple[Path, str]] = []
+            seen: set[str] = set()
+            for idx, item in enumerate(self.plans):
+                dst_name = self.working_targets[idx].strip()
+                err_code = validate_target_filename(dst_name)
+                if err_code:
+                    return [], self.t("error_row_message", row=idx + 1, message=self.t(f"error_{err_code}"))
+                key = dst_name.casefold()
+                if key in seen:
+                    return [], self.t("error_row_duplicate", row=idx + 1, name=dst_name)
+                seen.add(key)
+                pairs.append((item.src, dst_name))
+            return pairs, None
+
+        def do_apply(self) -> None:
+            pairs, err_msg = self.collect_pairs()
+            if err_msg:
+                self.show_message(self.t("dialog_invalid_targets_title"), err_msg)
+                return
+            changed, err = apply_rename_pairs(pairs)
+            if err:
+                self.show_message(self.t("dialog_rename_failed_title"), err)
+                return
+            self.show_message(self.t("dialog_done_title"), self.t("dialog_done_body", count=changed))
+            self.query_one("#apply", Button).disabled = True
+
+        def do_check_update(self) -> None:
+            update_status, message = check_update_once(update_url, APP_VERSION)
+            message = message.replace("\n", " | ")
+            if update_status is None:
+                text = self.t("dialog_update_failed", message=message).replace("\n", " | ")
+                self.show_message(self.t("dialog_update_title"), text)
+            elif update_status:
+                text = self.t("dialog_update_available", message=message).replace("\n", " | ")
+                self.show_message(self.t("dialog_update_title"), text)
+            else:
+                text = self.t("dialog_update_uptodate", message=message).replace("\n", " | ")
+                self.show_message(self.t("dialog_update_title"), text)
+
+        def do_about(self) -> None:
+            about = self.t("about_text", app_title=app_title, version=APP_VERSION, repo_url=GITHUB_URL)
+            self.show_message(self.t("dialog_about_title"), about)
+
+        def do_help(self) -> None:
+            help_text = self.t("tui_help_text")
+            self.show_message(self.t("menu_help"), help_text)
+
+        def do_switch_language(self) -> None:
+            self.lang_code = self.next_lang()
+            self.cfg["lang"] = self.lang_code
+            save_user_config(self.cfg)
+            self.refresh_table()
+            self.refresh_texts()
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "message_ok":
+                self.hide_message()
+                return
+            if event.button.id == "edit_cancel":
+                self.hide_edit_overlay()
+                return
+            if event.button.id == "folder_cancel":
+                self.hide_folder_overlay()
+                return
+            if event.button.id == "edit_save":
+                self.apply_edit()
+                return
+            if event.button.id == "folder_open":
+                self.confirm_folder_selection()
+                return
+            if event.button.id == "exit":
+                self.exit()
+                return
+            if event.button.id == "folder":
+                self.show_folder_overlay()
+                return
+            if event.button.id == "edit_target":
+                self.show_edit_overlay()
+                return
+            if event.button.id == "apply":
+                self.do_apply()
+                return
+            if event.button.id == "check_update":
+                self.do_check_update()
+                return
+            if event.button.id == "about":
+                self.do_about()
+                return
+            if event.button.id == "help":
+                self.do_help()
+                return
+            if event.button.id == "language":
+                self.do_switch_language()
+
+        def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
+            if self.query_one("#folder_overlay", Container).has_class("hidden"):
+                return
+            self.populate_tree_node(event.node)
+
+        def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+            if self.query_one("#folder_overlay", Container).has_class("hidden"):
+                return
+            data = getattr(event.node, "data", None)
+            if isinstance(data, Path):
+                self.folder_candidate = data.resolve()
+                self.query_one("#folder_label", Static).update(
+                    f"{self.t('dialog_folder_select_title')}\n{self.folder_candidate}"
+                )
+
+        def on_key(self, event) -> None:
+            if event.key != "enter":
+                return
+            if self.query_one("#folder_overlay", Container).has_class("hidden"):
+                return
+            self.confirm_folder_selection()
+            event.stop()
+
+        def action_edit_target(self) -> None:
+            self.show_edit_overlay()
+
+        def action_choose_folder(self) -> None:
+            self.show_folder_overlay()
+
+        def action_apply_rename(self) -> None:
+            self.do_apply()
+
+        def action_check_update(self) -> None:
+            self.do_check_update()
+
+        def action_switch_language(self) -> None:
+            self.do_switch_language()
+
+        def action_show_about(self) -> None:
+            self.do_about()
+
+        def action_show_help(self) -> None:
+            self.do_help()
+
+    app = PreviewApp()
+    if run_app:
+        app.run()
+        return None
+    return app
 
 
 def run_qt_gui_workflow(
@@ -1369,7 +1945,14 @@ def render_tk_gui_preview(plans: list[RenamePlan]) -> None:
     root.mainloop()
 
 
-def render_preview(plans: list[RenamePlan], ui_mode: str) -> None:
+def render_preview(
+    plans: list[RenamePlan],
+    ui_mode: str,
+    app_title: str,
+    update_url: str,
+    target_dir: Path,
+    scan_options: ScanOptions,
+) -> None:
     if ui_mode == "gui":
         print("[WARN] GUI mode is handled before preview rendering. Fallback to TUI/CLI preview here.")
         ui_mode = "tui"
@@ -1377,7 +1960,7 @@ def render_preview(plans: list[RenamePlan], ui_mode: str) -> None:
     if ui_mode == "tui":
         tui_backend = detect_tui_backend(try_install=True)
         if tui_backend == "textual":
-            render_textual_tui_preview(plans)
+            render_textual_tui_preview(plans, app_title, update_url, target_dir, scan_options)
             return
         if tui_backend == "rich":
             render_rich_tui_preview(plans)
@@ -1389,7 +1972,7 @@ def render_preview(plans: list[RenamePlan], ui_mode: str) -> None:
     if ui_mode == "auto":
         # GUI auto workflow is handled in main() with Qt.
         if detect_tui_backend(try_install=False):
-            render_preview(plans, "tui")
+            render_preview(plans, "tui", app_title, update_url, target_dir, scan_options)
             return
         render_cli_preview(plans)
         return
@@ -1472,7 +2055,7 @@ def main() -> int:
         print("[INFO] No .epub/.pdf files found.")
         return 0
 
-    render_preview(plans, args.ui)
+    render_preview(plans, args.ui, args.app_title, args.update_url, target, scan_options)
 
     if not args.apply:
         print("\n[INFO] Preview only. Use --apply to rename files.")
