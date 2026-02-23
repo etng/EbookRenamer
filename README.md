@@ -86,7 +86,7 @@ make release DOCKER_PLATFORM=linux/amd64
 GitHub Actions workflow is in `.github/workflows/build.yml`.
 
 Default release behavior:
-- only runs on tags matching `vX.Y.Z` (for example `v0.2.0`),
+- only runs on tags matching `vX.Y.Z` (for example `v0.2.1`),
 - builds artifacts for:
 - macOS
 - Linux

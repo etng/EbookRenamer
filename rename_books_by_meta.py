@@ -28,7 +28,7 @@ NOISE_PATTERNS = [
 
 WINDOWS_FILENAME_LIMIT = 255
 SAFE_FILENAME_LIMIT = 200
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 GITHUB_URL = "https://github.com/etng/ebook-renamer"
 UPDATE_METADATA_URL = "https://github.com/etng/EbookRenamer/releases/latest/download/latest.json"
 APP_CONFIG_DIR_NAME = "ebook-renamer"
