@@ -12,6 +12,10 @@ Rename `.epub` and `.pdf` files using metadata, with preview-first workflow, GUI
   - live filename length indicators,
   - check-for-update action (from `latest.json`),
   - About dialog and GitHub link.
+- Textual TUI supports:
+  - preview table,
+  - one-click `Apply Rename`,
+  - `Check Update`, `Language`, `About`, `Exit` actions.
 - i18n language packs:
   - English (`en`)
   - 简体中文 (`zh_CN`)
@@ -37,6 +41,16 @@ Launch GUI:
 ```bash
 python3 rename_books_by_meta.py --gui --app-title "Ebook Renamer"
 ```
+
+Makefile run helpers:
+
+```bash
+make run-cli DIR=.
+make run-tui DIR=.
+make run-gui DIR=. APP_TITLE="Ebook Renamer"
+```
+
+User guide: `docs/USER_GUIDE.md`
 
 Check update from command line:
 
@@ -72,7 +86,7 @@ make release DOCKER_PLATFORM=linux/amd64
 GitHub Actions workflow is in `.github/workflows/build.yml`.
 
 Default release behavior:
-- only runs on tags matching `vX.Y.Z` (for example `v0.1.0`),
+- only runs on tags matching `vX.Y.Z` (for example `v0.2.0`),
 - builds artifacts for:
 - macOS
 - Linux

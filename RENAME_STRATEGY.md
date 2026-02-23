@@ -108,6 +108,13 @@
 - `--tui`：强制使用 TUI 预览（不可用时会回退并提示）。
 - `--ui cli`：强制纯文本预览（适合脚本化和日志场景）。
 
+Textual TUI 中提供底部操作按钮：
+- `Apply Rename`
+- `Check Update`
+- `Language`
+- `About`
+- `Exit`
+
 示例：
 - `./rename_books_by_meta.py --dir . --gui`
 - `./rename_books_by_meta.py --dir . --tui`
