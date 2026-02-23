@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+
+# Build artifacts
+build/
+dist/
+release/
+.pyinstaller-cache/
+*.spec
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local runtime/config
+*.log
+
+# Ebook library files (do NOT commit)
+*.epub
+*.pdf
+*.mobi
+*.azw
+*.azw3
+*.djvu
+*.fb2
+
+# Large generated binaries/icons (keep source scripts)
+assets/*.icns
+assets/*.ico
+assets/*.png
