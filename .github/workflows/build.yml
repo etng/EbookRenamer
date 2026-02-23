@@ -132,14 +132,25 @@ jobs:
           WIN_SRC="$(find out/windows -type f -name 'EbookRenamer.exe' | head -n1)"
           LINUX_SRC="$(find out/linux -type f -name 'EbookRenamer' | head -n1)"
           MAC_SRC="$(find out/macos -type d -name 'EbookRenamer.app' | head -n1)"
+          MAC_CONTENTS="$(find out/macos -type d -name 'Contents' | head -n1)"
 
           test -n "${WIN_SRC}" || (echo "Windows artifact not found" && exit 1)
           test -n "${LINUX_SRC}" || (echo "Linux artifact not found" && exit 1)
-          test -n "${MAC_SRC}" || (echo "macOS artifact not found" && exit 1)
 
           cp "${WIN_SRC}" "release-assets/${WIN_ASSET}"
           tar -C "$(dirname "${LINUX_SRC}")" -czf "release-assets/${LINUX_ASSET}" "$(basename "${LINUX_SRC}")"
-          tar -C "$(dirname "${MAC_SRC}")" -czf "release-assets/${MAC_ASSET}" "$(basename "${MAC_SRC}")"
+
+          if test -n "${MAC_SRC}"; then
+            tar -C "$(dirname "${MAC_SRC}")" -czf "release-assets/${MAC_ASSET}" "$(basename "${MAC_SRC}")"
+          elif test -n "${MAC_CONTENTS}"; then
+            tar -C "$(dirname "${MAC_CONTENTS}")" \
+              --transform 's,^Contents,EbookRenamer.app/Contents,' \
+              -czf "release-assets/${MAC_ASSET}" \
+              "$(basename "${MAC_CONTENTS}")"
+          else
+            echo "macOS artifact not found"
+            exit 1
+          fi
 
           python3 -c "import json,pathlib; tag='${TAG}'; version='${VERSION}'; repo='${REPO}'; win='${WIN_ASSET}'; linux='${LINUX_ASSET}'; mac='${MAC_ASSET}'; base=f'https://github.com/{repo}/releases/download/{tag}'; latest={'version':version,'tag':tag,'release_url':f'https://github.com/{repo}/releases/tag/{tag}','assets':{'windows':{'name':win,'url':f'{base}/{win}'},'linux':{'name':linux,'url':f'{base}/{linux}'},'macos':{'name':mac,'url':f'{base}/{mac}'}}}; pathlib.Path('release-assets/latest.json').write_text(json.dumps(latest, ensure_ascii=False, indent=2), encoding='utf-8')"
 
