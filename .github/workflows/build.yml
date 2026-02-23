@@ -160,10 +160,12 @@ jobs:
         run: |
           set -e
           TAG="${GITHUB_REF_NAME}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release-assets/* --clobber
+          REPO="${GITHUB_REPOSITORY}"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber --repo "$REPO"
           else
             gh release create "$TAG" release-assets/* \
+              --repo "$REPO" \
               --title "$TAG" \
               --notes "Automated build for $TAG"
           fi
