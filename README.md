@@ -44,6 +44,14 @@ Check update from command line:
 python3 rename_books_by_meta.py --check-update
 ```
 
+PDF metadata supplement (local text probe from first page):
+
+```bash
+python3 rename_books_by_meta.py --ui cli --dir . --allow-ocr --allow-online
+```
+
+`--allow-ocr` and `--allow-online` are reserved flags for future use. They are accepted now but not implemented yet.
+
 ## Build
 
 ```bash
@@ -64,7 +72,7 @@ make release DOCKER_PLATFORM=linux/amd64
 GitHub Actions workflow is in `.github/workflows/build.yml`.
 
 Default release behavior:
-- only runs on tags matching `vX.Y.Z` (for example `v0.0.1`),
+- only runs on tags matching `vX.Y.Z` (for example `v0.1.0`),
 - builds artifacts for:
 - macOS
 - Linux
