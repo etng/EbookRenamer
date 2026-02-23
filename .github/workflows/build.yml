@@ -133,12 +133,7 @@ jobs:
           tar -C out/linux -czf "release-assets/${LINUX_ASSET}" EbookRenamer
           tar -C out/macos -czf "release-assets/${MAC_ASSET}" EbookRenamer.app
 
-          python3 -c "import json, pathlib; \
-tag='${TAG}'; version='${VERSION}'; repo='${REPO}'; \
-win='${WIN_ASSET}'; linux='${LINUX_ASSET}'; mac='${MAC_ASSET}'; \
-base=f'https://github.com/{repo}/releases/download/{tag}'; \
-latest={'version':version,'tag':tag,'release_url':f'https://github.com/{repo}/releases/tag/{tag}','assets':{'windows':{'name':win,'url':f'{base}/{win}'},'linux':{'name':linux,'url':f'{base}/{linux}'},'macos':{'name':mac,'url':f'{base}/{mac}'}}}; \
-pathlib.Path('release-assets/latest.json').write_text(json.dumps(latest, ensure_ascii=False, indent=2), encoding='utf-8')"
+          python3 -c "import json,pathlib; tag='${TAG}'; version='${VERSION}'; repo='${REPO}'; win='${WIN_ASSET}'; linux='${LINUX_ASSET}'; mac='${MAC_ASSET}'; base=f'https://github.com/{repo}/releases/download/{tag}'; latest={'version':version,'tag':tag,'release_url':f'https://github.com/{repo}/releases/tag/{tag}','assets':{'windows':{'name':win,'url':f'{base}/{win}'},'linux':{'name':linux,'url':f'{base}/{linux}'},'macos':{'name':mac,'url':f'{base}/{mac}'}}}; pathlib.Path('release-assets/latest.json').write_text(json.dumps(latest, ensure_ascii=False, indent=2), encoding='utf-8')"
 
       - name: Create or update release
         env:
