@@ -11,6 +11,8 @@ import shutil
 import site
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -26,8 +28,9 @@ NOISE_PATTERNS = [
 
 WINDOWS_FILENAME_LIMIT = 255
 SAFE_FILENAME_LIMIT = 200
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.0.1"
 GITHUB_URL = "https://github.com/etng/ebook-renamer"
+UPDATE_METADATA_URL = "https://github.com/etng/EbookRenamer/releases/latest/download/latest.json"
 APP_CONFIG_DIR_NAME = "ebook-renamer"
 APP_CONFIG_FILE_NAME = "config.json"
 
@@ -144,6 +147,52 @@ def load_language_packs() -> dict[str, dict[str, str]]:
         except Exception:
             continue
     return packs
+
+
+def parse_semver(version: str) -> tuple[int, int, int] | None:
+    m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", version.strip())
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def fetch_latest_metadata(update_url: str) -> tuple[dict | None, str | None]:
+    try:
+        with urllib.request.urlopen(update_url, timeout=8) as resp:
+            if resp.status != 200:
+                return None, f"HTTP {resp.status}"
+            payload = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(payload)
+        if not isinstance(data, dict):
+            return None, "invalid metadata format"
+        return data, None
+    except urllib.error.HTTPError as e:
+        return None, f"HTTPError {e.code}"
+    except urllib.error.URLError as e:
+        return None, f"URLError {e.reason}"
+    except Exception as e:
+        return None, str(e)
+
+
+def check_update_once(update_url: str, current_version: str) -> tuple[bool | None, str]:
+    data, err = fetch_latest_metadata(update_url)
+    if err:
+        return None, f"check failed: {err}"
+
+    latest = str(data.get("version", "")).strip()
+    if not latest:
+        latest = str(data.get("tag", "")).strip().lstrip("v")
+    latest_release_url = str(data.get("release_url", "")).strip()
+
+    cur_sem = parse_semver(current_version)
+    latest_sem = parse_semver(latest)
+    if cur_sem is None or latest_sem is None:
+        return None, f"invalid semver (current={current_version}, latest={latest})"
+
+    if latest_sem > cur_sem:
+        suffix = f"\nrelease: {latest_release_url}" if latest_release_url else ""
+        return True, f"new version available: {latest} (current: {current_version}){suffix}"
+    return False, f"up to date: {current_version}"
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -824,7 +873,13 @@ def render_textual_tui_preview(plans: list[RenamePlan]) -> None:
     PreviewApp().run()
 
 
-def run_qt_gui_workflow(initial_dir: Path, backend: str, app_title: str, app_icon: str | None) -> int:
+def run_qt_gui_workflow(
+    initial_dir: Path,
+    backend: str,
+    app_title: str,
+    app_icon: str | None,
+    update_url: str,
+) -> int:
     if backend == "PySide6":
         from PySide6.QtCore import Qt, QUrl
         from PySide6.QtGui import QDesktopServices, QIcon
@@ -874,6 +929,7 @@ def run_qt_gui_workflow(initial_dir: Path, backend: str, app_title: str, app_ico
             self.current_dir: Path | None = None
             self.row_sources: list[Path] = []
             self.repo_url = GITHUB_URL
+            self.update_url = update_url
             self.packs = all_packs
             self.cfg = load_user_config()
             self.lang_code = self.resolve_initial_lang()
@@ -887,6 +943,8 @@ def run_qt_gui_workflow(initial_dir: Path, backend: str, app_title: str, app_ico
             self.help_menu = help_menu
             self.about_action = help_menu.addAction("About")
             self.about_action.triggered.connect(self.show_about)
+            self.check_update_action = help_menu.addAction("Check Update")
+            self.check_update_action.triggered.connect(self.check_update)
 
             top = QHBoxLayout()
             self.folder_label = QLabel("Folder:")
@@ -916,6 +974,8 @@ def run_qt_gui_workflow(initial_dir: Path, backend: str, app_title: str, app_ico
             bottom.addWidget(self.status, 1)
             self.about_btn = QPushButton("About")
             bottom.addWidget(self.about_btn)
+            self.check_update_btn = QPushButton("Check Update")
+            bottom.addWidget(self.check_update_btn)
             self.apply_btn = QPushButton("Apply Rename")
             bottom.addWidget(self.apply_btn)
             root.addLayout(bottom)
@@ -924,6 +984,7 @@ def run_qt_gui_workflow(initial_dir: Path, backend: str, app_title: str, app_ico
             self.rescan_btn.clicked.connect(self.rescan)
             self.apply_btn.clicked.connect(self.apply_rename)
             self.about_btn.clicked.connect(self.show_about)
+            self.check_update_btn.clicked.connect(self.check_update)
             self.table.itemChanged.connect(self.on_item_changed)
             self.lang_combo.currentIndexChanged.connect(self.on_language_changed)
 
@@ -966,12 +1027,14 @@ def run_qt_gui_workflow(initial_dir: Path, backend: str, app_title: str, app_ico
             self.setWindowTitle(self.t("window_title", app_title=app_title))
             self.help_menu.setTitle(self.t("menu_help"))
             self.about_action.setText(self.t("menu_about"))
+            self.check_update_action.setText(self.t("menu_check_update"))
             if self.folder_label:
                 self.folder_label.setText(self.t("label_folder"))
             self.lang_label.setText(self.t("label_language"))
             self.choose_btn.setText(self.t("button_choose_folder"))
             self.rescan_btn.setText(self.t("button_rescan"))
             self.about_btn.setText(self.t("button_about"))
+            self.check_update_btn.setText(self.t("button_check_update"))
             self.apply_btn.setText(self.t("button_apply"))
             self.table.setHorizontalHeaderLabels(
                 [
@@ -1026,6 +1089,16 @@ def run_qt_gui_workflow(initial_dir: Path, backend: str, app_title: str, app_ico
             msg.exec()
             if msg.clickedButton() == open_btn:
                 QDesktopServices.openUrl(QUrl(self.repo_url))
+
+        def check_update(self) -> None:
+            status, message = check_update_once(self.update_url, APP_VERSION)
+            if status is None:
+                QMessageBox.warning(self, self.t("dialog_update_title"), self.t("dialog_update_failed", message=message))
+                return
+            if status:
+                QMessageBox.information(self, self.t("dialog_update_title"), self.t("dialog_update_available", message=message))
+            else:
+                QMessageBox.information(self, self.t("dialog_update_title"), self.t("dialog_update_uptodate", message=message))
 
         def rescan(self) -> None:
             if self.current_dir is None:
@@ -1216,6 +1289,8 @@ def main() -> int:
     parser.add_argument("--tui", action="store_true", help="Preview with best available TUI backend")
     parser.add_argument("--app-title", default="Ebook Renamer", help="GUI app window title")
     parser.add_argument("--app-icon", default="", help="GUI app icon path (.ico/.icns/.png)")
+    parser.add_argument("--check-update", action="store_true", help="Check latest version from release metadata and exit")
+    parser.add_argument("--update-url", default=UPDATE_METADATA_URL, help="Update metadata URL (latest.json)")
     parser.add_argument(
         "--ui",
         choices=["auto", "cli", "gui", "tui"],
@@ -1227,6 +1302,13 @@ def main() -> int:
     if args.gui and args.tui:
         print("[ERROR] --gui and --tui cannot be used together.")
         return 1
+
+    if args.check_update:
+        status, message = check_update_once(args.update_url, APP_VERSION)
+        prefix = "[UPDATE]"
+        print(f"{prefix} {message}")
+        return 0 if status is not None else 1
+
     if args.gui:
         args.ui = "gui"
     elif args.tui:
@@ -1245,6 +1327,7 @@ def main() -> int:
                         backend=gui_backend,
                         app_title=args.app_title,
                         app_icon=args.app_icon or None,
+                        update_url=args.update_url,
                     )
                 except Exception as e:
                     print(f"[WARN] Failed to launch GUI workflow: {e}. Falling back to TUI/CLI.")

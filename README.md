@@ -10,6 +10,7 @@ Rename `.epub` and `.pdf` files using metadata, with preview-first workflow, GUI
   - folder selection,
   - editable target names,
   - live filename length indicators,
+  - check-for-update action (from `latest.json`),
   - About dialog and GitHub link.
 - i18n language packs:
   - English (`en`)
@@ -37,6 +38,12 @@ Launch GUI:
 python3 rename_books_by_meta.py --gui --app-title "Ebook Renamer"
 ```
 
+Check update from command line:
+
+```bash
+python3 rename_books_by_meta.py --check-update
+```
+
 ## Build
 
 ```bash
@@ -56,12 +63,16 @@ make release DOCKER_PLATFORM=linux/amd64
 
 GitHub Actions workflow is in `.github/workflows/build.yml`.
 
-It builds artifacts for:
+Default release behavior:
+- only runs on tags matching `vX.Y.Z` (for example `v0.0.1`),
+- builds artifacts for:
 - macOS
 - Linux
 - Windows
+- creates/updates the GitHub Release for that tag,
+- uploads `latest.json` for in-app update checks.
 
-Run manually from Actions tab, or on push/PR.
+Manual run is still available via `workflow_dispatch`.
 
 ## Notes
 

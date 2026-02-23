@@ -129,6 +129,8 @@
 - GUI 中提供 `Help -> About` 菜单项和底部 `About` 按钮。
 - About 弹窗显示程序版本和功能简介。
 - 可点击跳转 GitHub：`https://github.com/etng/ebook-renamer`
+- GUI 中提供“检查更新”按钮/菜单，读取 Release `latest.json` 判断是否有新版本。
+- CLI 也支持：`--check-update`（可配合 `--update-url`）。
 
 ## 多语言（i18n）
 - 已抽取界面文案到语言包目录：`locales/`
