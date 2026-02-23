@@ -173,7 +173,9 @@ jobs:
               echo
               git log "${PREV_TAG}..${TAG}" --pretty=format:'- %s (%h)'
             else
-              echo "Initial release."
+              echo "Changes up to \`$TAG\`:"
+              echo
+              git log "${TAG}" --pretty=format:'- %s (%h)'
             fi
           } > "$NOTES_FILE"
 
