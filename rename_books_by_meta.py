@@ -1,0 +1,1282 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import locale
+import os
+import re
+import shutil
+import site
+import subprocess
+import sys
+import zipfile
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
+
+NOISE_PATTERNS = [
+    r"z-library",
+    r"1lib",
+    r"z-lib",
+    r"lib\.sk",
+]
+
+WINDOWS_FILENAME_LIMIT = 255
+SAFE_FILENAME_LIMIT = 200
+APP_VERSION = "0.1.0"
+GITHUB_URL = "https://github.com/etng/ebook-renamer"
+APP_CONFIG_DIR_NAME = "ebook-renamer"
+APP_CONFIG_FILE_NAME = "config.json"
+
+LANG_DISPLAY_NAMES = {
+    "en": "English",
+    "zh_CN": "简体中文",
+    "zh_TW": "繁體中文",
+    "ja": "日本語",
+    "vi": "Tiếng Việt",
+}
+DEFAULT_LANG = "en"
+
+
+@dataclass
+class BookMeta:
+    title: str | None = None
+    author: str | None = None
+    date: str | None = None
+    modified: str | None = None
+
+
+@dataclass
+class RenamePlan:
+    src: Path
+    dst: str
+    reason: dict[str, str]
+
+
+def resource_base_dir() -> Path:
+    if getattr(sys, "_MEIPASS", None):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parent
+
+
+def get_locales_dir() -> Path:
+    return resource_base_dir() / "locales"
+
+
+def get_config_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_CONFIG_DIR_NAME
+    if sys.platform.startswith("win"):
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / APP_CONFIG_DIR_NAME
+    return Path.home() / ".config" / APP_CONFIG_DIR_NAME
+
+
+def get_config_file() -> Path:
+    return get_config_dir() / APP_CONFIG_FILE_NAME
+
+
+def load_user_config() -> dict:
+    cfg_file = get_config_file()
+    if not cfg_file.exists():
+        return {}
+    try:
+        return json.loads(cfg_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_user_config(cfg: dict) -> None:
+    cfg_dir = get_config_dir()
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    cfg_file = get_config_file()
+    cfg_file.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def normalize_lang_code(raw: str | None) -> str:
+    if not raw:
+        return DEFAULT_LANG
+    code = raw.strip().replace("-", "_")
+    code = code.split(".")[0]
+    code_l = code.lower()
+    if code_l.startswith("zh_tw") or code_l.startswith("zh_hk") or code_l.startswith("zh_mo"):
+        return "zh_TW"
+    if code_l.startswith("zh"):
+        return "zh_CN"
+    if code_l.startswith("ja"):
+        return "ja"
+    if code_l.startswith("vi"):
+        return "vi"
+    if code_l.startswith("en"):
+        return "en"
+    return DEFAULT_LANG
+
+
+def detect_system_language() -> str:
+    env_lang = os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES") or os.environ.get("LANG")
+    if env_lang:
+        return normalize_lang_code(env_lang)
+    try:
+        loc = locale.getlocale()[0]
+        if loc:
+            return normalize_lang_code(loc)
+    except Exception:
+        pass
+    return DEFAULT_LANG
+
+
+def load_language_packs() -> dict[str, dict[str, str]]:
+    packs: dict[str, dict[str, str]] = {}
+    loc_dir = get_locales_dir()
+    if not loc_dir.exists():
+        return packs
+
+    for code in LANG_DISPLAY_NAMES.keys():
+        p = loc_dir / f"{code}.json"
+        if not p.exists():
+            continue
+        try:
+            packs[code] = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+    return packs
+
+
+def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, text=True, capture_output=True, check=False)
+
+
+def detect_pkg_manager() -> str | None:
+    for candidate in ["brew", "apt-get", "dnf", "yum", "pacman", "zypper", "choco", "winget"]:
+        if shutil.which(candidate):
+            return candidate
+    return None
+
+
+def install_command(command_name: str) -> bool:
+    manager = detect_pkg_manager()
+    if manager is None:
+        print(f"[WARN] {command_name} not found and no supported package manager detected.")
+        return False
+
+    install_map = {
+        "pdfinfo": {
+            "brew": [["brew", "install", "poppler"]],
+            "apt-get": [["sudo", "apt-get", "update"], ["sudo", "apt-get", "install", "-y", "poppler-utils"]],
+            "dnf": [["sudo", "dnf", "install", "-y", "poppler-utils"]],
+            "yum": [["sudo", "yum", "install", "-y", "poppler-utils"]],
+            "pacman": [["sudo", "pacman", "-Sy", "--noconfirm", "poppler"]],
+            "zypper": [["sudo", "zypper", "install", "-y", "poppler-tools"]],
+            "choco": [["choco", "install", "poppler", "-y"]],
+            "winget": [["winget", "install", "--id", "oschwartz10612.poppler", "-e"]],
+        }
+    }
+
+    recipe = install_map.get(command_name, {}).get(manager)
+    if not recipe:
+        print(f"[WARN] No install recipe for {command_name} via {manager}.")
+        return False
+
+    print(f"[INFO] {command_name} not found. Trying to install via {manager} ...")
+    for cmd in recipe:
+        print("[INFO] $", " ".join(cmd))
+        proc = run(cmd)
+        if proc.returncode != 0:
+            if proc.stderr:
+                print(proc.stderr.strip())
+            if proc.stdout:
+                print(proc.stdout.strip())
+            print(f"[WARN] Install step failed: {' '.join(cmd)}")
+            return False
+
+    ok = shutil.which(command_name) is not None
+    if ok:
+        print(f"[INFO] {command_name} installed successfully.")
+    else:
+        print(f"[WARN] Tried installing {command_name}, but it is still unavailable.")
+    return ok
+
+
+def ensure_command(command_name: str) -> bool:
+    if shutil.which(command_name):
+        return True
+    return install_command(command_name)
+
+
+def has_module(module_name: str) -> bool:
+    if importlib.util.find_spec(module_name) is not None:
+        return True
+    enable_user_site_path()
+    importlib.invalidate_caches()
+    return importlib.util.find_spec(module_name) is not None
+
+
+def can_import_module(module_name: str) -> bool:
+    try:
+        __import__(module_name)
+        return True
+    except Exception:
+        return False
+
+
+def enable_user_site_path() -> None:
+    candidates: list[str] = []
+    try:
+        candidates.append(site.getusersitepackages())
+    except Exception:
+        pass
+    candidates.append(
+        os.path.expanduser(
+            f"~/Library/Python/{sys.version_info.major}.{sys.version_info.minor}/lib/python/site-packages"
+        )
+    )
+    for p in candidates:
+        if p and os.path.isdir(p) and p not in sys.path:
+            sys.path.append(p)
+
+
+def ensure_python_module(module_name: str, package_name: str | None = None) -> bool:
+    if has_module(module_name):
+        return True
+    pkg = package_name or module_name
+    print(f"[INFO] Python module '{module_name}' not found. Trying to install '{pkg}' ...")
+    install_attempts = [
+        [sys.executable, "-m", "pip", "install", "--user", pkg],
+    ]
+
+    # On Homebrew/externally managed Python (PEP 668), pip may require this flag.
+    install_attempts.append(
+        [sys.executable, "-m", "pip", "install", "--break-system-packages", "--user", pkg]
+    )
+
+    last_stdout = ""
+    last_stderr = ""
+    for idx, cmd in enumerate(install_attempts):
+        proc = run(cmd)
+        last_stdout = proc.stdout or ""
+        last_stderr = proc.stderr or ""
+        if proc.returncode == 0:
+            break
+
+        if idx == 0 and "externally-managed-environment" in (last_stderr + last_stdout):
+            print("[INFO] Detected externally-managed Python; retrying with --break-system-packages.")
+            continue
+
+        if last_stderr:
+            print(last_stderr.strip())
+        if last_stdout:
+            print(last_stdout.strip())
+        print(f"[WARN] Failed to install python package: {pkg}")
+        return False
+
+    enable_user_site_path()
+    importlib.invalidate_caches()
+    if not has_module(module_name):
+        if last_stderr:
+            print(last_stderr.strip())
+        if last_stdout:
+            print(last_stdout.strip())
+        try_import = run([sys.executable, "-c", f"import {module_name}; print('ok')"])
+        if try_import.returncode == 0:
+            print(
+                f"[INFO] Module '{module_name}' is importable in a fresh interpreter; "
+                "current process path was refreshed."
+            )
+            return True
+        print(
+            f"[WARN] Installed package '{pkg}' but module '{module_name}' is still unavailable. "
+            f"python={sys.executable}"
+        )
+        return False
+    return has_module(module_name)
+
+
+def extract_year(text: str | None) -> str | None:
+    if not text:
+        return None
+    m = re.search(r"(19\d{2}|20\d{2}|2100)", text)
+    return m.group(1) if m else None
+
+
+def clean_text(text: str) -> str:
+    value = text
+    for p in NOISE_PATTERNS:
+        value = re.sub(p, "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\([^)]*\)", "", value)
+    value = re.sub(r"\s+", " ", value).strip(" ._-")
+    return value
+
+
+def normalize_file_token(text: str) -> str:
+    value = text.strip()
+    value = re.sub(r"[\\/:*?\"<>|]", " ", value)
+    value = re.sub(r"[.,;()\[\]{}]", " ", value)
+    value = re.sub(r"\s+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_ .")
+    return value or "Unknown"
+
+
+def abbreviate_title_phrases(title: str) -> str:
+    value = title
+
+    # Normalize common typo first.
+    value = re.sub(r"\bEdtion\b", "Edition", value, flags=re.IGNORECASE)
+
+    # 2nd Edition -> 2e, 3rd Edition -> 3e ...
+    value = re.sub(
+        r"\b(\d+)\s*(st|nd|rd|th)\s+Edition\b",
+        lambda m: f"{m.group(1)}e",
+        value,
+        flags=re.IGNORECASE,
+    )
+    # Second Edition -> 2e (common written ordinals)
+    word_ordinal = {
+        "first": "1e",
+        "second": "2e",
+        "third": "3e",
+        "fourth": "4e",
+        "fifth": "5e",
+        "sixth": "6e",
+        "seventh": "7e",
+        "eighth": "8e",
+        "ninth": "9e",
+        "tenth": "10e",
+    }
+    for k, v in word_ordinal.items():
+        value = re.sub(rf"\b{k}\s+Edition\b", v, value, flags=re.IGNORECASE)
+
+    # Other concise markers.
+    replacements = [
+        (r"\bRevised\s+Edition\b", "RevEd"),
+        (r"\bUpdated\s+Edition\b", "UpdEd"),
+        (r"\bInternational\s+Edition\b", "IntlEd"),
+        (r"\bCollector'?s\s+Edition\b", "CollEd"),
+        (r"\bSpecial\s+Edition\b", "SpecEd"),
+        (r"\bStudent\s+Edition\b", "StuEd"),
+        (r"\bEdition\b", "Ed"),
+        (r"\bRelease\b", "Rel"),
+        (r"\bVolume\b", "Vol"),
+        (r"\bVol\.\b", "Vol"),
+        (r"\bPart\b", "Pt"),
+        (r"\bNumber\b", "No"),
+    ]
+    for pattern, repl in replacements:
+        value = re.sub(pattern, repl, value, flags=re.IGNORECASE)
+
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def main_title_only(title: str) -> str:
+    t = clean_text(title)
+    t = re.sub(r"\s+A\s+Novel\s+about\s+.*$", "", t, flags=re.IGNORECASE)
+    for sep in [" -- ", " - ", ": "]:
+        if sep in t:
+            head, tail = t.split(sep, 1)
+            # Keep edition info if it appears in tail and head is too generic.
+            if re.search(r"\b\d+(st|nd|rd|th)\s+edition\b", tail, flags=re.IGNORECASE):
+                t = f"{head} {re.search(r'\b\d+(st|nd|rd|th)\s+edition\b', tail, flags=re.IGNORECASE).group(0)}"
+            else:
+                t = head
+            break
+    return t.strip()
+
+
+def looks_like_bad_title(title: str | None) -> bool:
+    if not title:
+        return True
+    t = title.strip()
+    if len(t) < 3:
+        return True
+    if re.fullmatch(r"B[0-9A-Z]{9}(?:\s*\(.*\))?", t):
+        return True
+    return False
+
+
+def title_word_count(text: str | None) -> int:
+    if not text:
+        return 0
+    return len(re.findall(r"[A-Za-z0-9]+", text))
+
+
+def choose_best_title(path: Path, meta_title: str | None) -> str:
+    fallback = fallback_title_from_filename(path)
+    if looks_like_bad_title(meta_title):
+        return fallback
+
+    meta_main = main_title_only(meta_title or "")
+    fallback_main = main_title_only(fallback)
+
+    # If metadata title is too short but filename contains a richer title that
+    # starts with the same phrase, prefer the richer one.
+    if (
+        title_word_count(meta_main) <= 2
+        and title_word_count(fallback_main) >= 4
+        and fallback_main.lower().startswith(meta_main.lower())
+    ):
+        return fallback_main
+
+    return meta_main
+
+
+def split_first_author(author_text: str | None) -> str | None:
+    if not author_text:
+        return None
+    value = author_text.strip().strip(";")
+    value = re.sub(r"\b(PhD|M\.D\.|MD)\b", "", value, flags=re.IGNORECASE).strip(" ,;")
+
+    m = re.split(r"\s*(?:,|;| and | & )\s*", value)
+    if m:
+        first = m[0].strip()
+    else:
+        first = value
+
+    # Handle "Last, First"
+    if "," in first:
+        parts = [p.strip() for p in first.split(",") if p.strip()]
+        if len(parts) >= 2:
+            first = f"{parts[1]} {parts[0]}"
+
+    if not first:
+        return None
+    return re.sub(r"\s+", " ", first)
+
+
+def author_from_filename(name_stem: str) -> str | None:
+    groups = re.findall(r"\(([^)]{2,})\)", name_stem)
+    for g in groups:
+        if re.search(r"z-library|1lib|z-lib|lib\.sk", g, flags=re.IGNORECASE):
+            continue
+        raw = g.strip()
+        if not raw:
+            continue
+
+        if "," in raw or ";" in raw:
+            candidate = re.split(r"\s*(?:,|;)\s*", raw)[0].strip()
+            if candidate:
+                return candidate
+
+        tokens = raw.split()
+        if len(tokens) >= 2:
+            return f"{tokens[0]} {tokens[1]}"
+        return raw
+    return None
+
+
+def parse_pdf_meta(path: Path) -> BookMeta:
+    if not ensure_command("pdfinfo"):
+        raise RuntimeError("pdfinfo unavailable and auto-install failed")
+
+    proc = run(["pdfinfo", str(path)])
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"pdfinfo failed for {path}")
+
+    data: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        data[key.strip()] = value.strip()
+
+    return BookMeta(
+        title=data.get("Title") or None,
+        author=data.get("Author") or None,
+        date=data.get("CreationDate") or None,
+        modified=data.get("ModDate") or None,
+    )
+
+
+def find_opf_path(epub_path: Path) -> str:
+    with zipfile.ZipFile(epub_path) as zf:
+        with zf.open("META-INF/container.xml") as f:
+            tree = ET.parse(f)
+    root = tree.getroot()
+    for elem in root.iter():
+        if elem.tag.endswith("rootfile"):
+            full_path = elem.attrib.get("full-path")
+            if full_path:
+                return full_path
+    raise RuntimeError(f"Cannot locate OPF in {epub_path.name}")
+
+
+def parse_epub_meta(path: Path) -> BookMeta:
+    opf_path = find_opf_path(path)
+
+    with zipfile.ZipFile(path) as zf:
+        with zf.open(opf_path) as f:
+            tree = ET.parse(f)
+
+    root = tree.getroot()
+
+    titles: list[str] = []
+    creators: list[str] = []
+    dates: list[str] = []
+    modified: str | None = None
+
+    for elem in root.iter():
+        tag = elem.tag.lower()
+        text = (elem.text or "").strip()
+        if tag.endswith("title") and text:
+            titles.append(text)
+        elif tag.endswith("creator") and text:
+            creators.append(text)
+        elif tag.endswith("date") and text:
+            dates.append(text)
+        elif tag.endswith("meta"):
+            prop = elem.attrib.get("property", "")
+            if prop == "dcterms:modified" and text:
+                modified = text
+
+    return BookMeta(
+        title=titles[0] if titles else None,
+        author=creators[0] if creators else None,
+        date=dates[0] if dates else None,
+        modified=modified,
+    )
+
+
+def fallback_title_from_filename(path: Path) -> str:
+    stem = clean_text(path.stem)
+    # Remove likely author/source tails in parentheses already done by clean_text.
+    return main_title_only(stem)
+
+
+def build_new_name(path: Path, meta: BookMeta) -> tuple[str, dict[str, str]]:
+    title_raw = choose_best_title(path, meta.title)
+    title_abbr = abbreviate_title_phrases(title_raw)
+    title = normalize_file_token(title_abbr)
+
+    author_raw = split_first_author(meta.author)
+    if not author_raw:
+        author_raw = author_from_filename(path.stem) or "UnknownAuthor"
+    author = normalize_file_token(author_raw)
+
+    year = (
+        extract_year(meta.date)
+        or extract_year(meta.modified)
+        or extract_year(path.stem)
+        or "UnknownYear"
+    )
+
+    new_name = f"{title}-{author}-{year}{path.suffix.lower()}"
+    reason = {
+        "title": title_raw or "fallback(filename)",
+        "title_final": title,
+        "title_len": str(len(title)),
+        "author": author_raw,
+        "year": year,
+        "name_len": str(len(new_name)),
+    }
+    return new_name, reason
+
+
+def unique_name(target_dir: Path, desired_name: str) -> str:
+    candidate = desired_name
+    base = Path(desired_name).stem
+    suffix = Path(desired_name).suffix
+    n = 2
+    while (target_dir / candidate).exists():
+        candidate = f"{base}-{n}{suffix}"
+        n += 1
+    return candidate
+
+
+def collect_files(dir_path: Path) -> Iterable[Path]:
+    for p in sorted(dir_path.iterdir()):
+        if p.is_file() and p.suffix.lower() in {".epub", ".pdf"}:
+            yield p
+
+
+def detect_gui_backend(try_install: bool = False) -> str | None:
+    # Priority: Qt > Tk
+    candidates: list[tuple[str, str | None]] = [
+        ("PySide6", "PySide6"),
+        ("PyQt6", "PyQt6"),
+        ("tkinter", None),
+    ]
+    for module_name, pkg_name in candidates:
+        if has_module(module_name) and can_import_module(module_name):
+            return module_name
+    if try_install:
+        for module_name, pkg_name in candidates:
+            if module_name == "tkinter":
+                continue
+            if ensure_python_module(module_name, pkg_name):
+                return module_name
+    return None
+
+
+def detect_tui_backend(try_install: bool = False) -> str | None:
+    # Priority: Textual > Rich
+    candidates: list[tuple[str, str]] = [
+        ("textual", "textual"),
+        ("rich", "rich"),
+    ]
+    for module_name, _ in candidates:
+        if has_module(module_name):
+            return module_name
+    if try_install:
+        for module_name, pkg_name in candidates:
+            if ensure_python_module(module_name, pkg_name):
+                return module_name
+    return None
+
+
+def can_show_gui() -> bool:
+    if sys.platform in {"darwin", "win32"}:
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def calc_title_len_from_target(target_name: str) -> int:
+    stem = Path(target_name).stem
+    title_part = stem.split("-", 1)[0] if "-" in stem else stem
+    return len(title_part)
+
+
+def calc_length_note(name_len: int, same_name: bool) -> str:
+    if name_len > WINDOWS_FILENAME_LIMIT:
+        return ">255"
+    if name_len > SAFE_FILENAME_LIMIT:
+        return ">200"
+    if same_name:
+        return "same"
+    return ""
+
+
+def validate_target_filename(name: str) -> str | None:
+    value = name.strip()
+    if not value:
+        return "target_empty"
+    if "/" in value or "\\" in value:
+        return "target_path_separators"
+    if re.search(r'[:*?"<>|]', value):
+        return "target_windows_illegal_chars"
+    if value in {".", ".."}:
+        return "target_invalid_dot"
+    return None
+
+
+def build_plans_for_directory(target: Path) -> list[RenamePlan]:
+    plans: list[RenamePlan] = []
+    for file_path in collect_files(target):
+        try:
+            if file_path.suffix.lower() == ".pdf":
+                meta = parse_pdf_meta(file_path)
+            else:
+                meta = parse_epub_meta(file_path)
+        except Exception as e:
+            print(f"[WARN] Metadata parse failed for {file_path.name}: {e}")
+            meta = BookMeta()
+
+        desired, reason = build_new_name(file_path, meta)
+        final_name = unique_name(target, desired) if desired != file_path.name else desired
+        plans.append(RenamePlan(src=file_path, dst=final_name, reason=reason))
+    return plans
+
+
+def apply_rename_pairs(rename_pairs: list[tuple[Path, str]]) -> tuple[int, str | None]:
+    if not rename_pairs:
+        return 0, None
+
+    src_paths = [src for src, _ in rename_pairs]
+    src_set = set(src_paths)
+    target_dir = src_paths[0].parent
+
+    seen: set[str] = set()
+    for src, dst_name in rename_pairs:
+        key = dst_name.casefold()
+        if key in seen:
+            return 0, f"Duplicate target filename: {dst_name}"
+        seen.add(key)
+        dst_path = target_dir / dst_name
+        if dst_path.exists() and dst_path not in src_set:
+            return 0, f"Target already exists: {dst_name}"
+
+    temp_moves: list[tuple[Path, Path]] = []
+    final_moves: list[tuple[Path, Path]] = []
+    try:
+        for idx, (src, dst_name) in enumerate(rename_pairs):
+            if src.name == dst_name:
+                continue
+            tmp = src.parent / f".rename_tmp_{os.getpid()}_{idx}_{src.name}"
+            while tmp.exists():
+                tmp = src.parent / f".rename_tmp_{os.getpid()}_{idx}_{os.urandom(2).hex()}_{src.name}"
+            src.rename(tmp)
+            temp_moves.append((tmp, src))
+            final_moves.append((tmp, src.parent / dst_name))
+
+        changed = 0
+        for tmp, dst in final_moves:
+            tmp.rename(dst)
+            changed += 1
+        return changed, None
+    except Exception as e:
+        for tmp, original in reversed(temp_moves):
+            try:
+                if tmp.exists():
+                    tmp.rename(original)
+            except Exception:
+                pass
+        return 0, str(e)
+
+
+def render_cli_preview(plans: list[RenamePlan]) -> None:
+    print("\n=== Rename Preview ===")
+    for item in plans:
+        src = item.src
+        dst = item.dst
+        reason = item.reason
+        marker = "(same)" if src.name == dst else ""
+        length_note = ""
+        try:
+            dst_len = int(reason["name_len"])
+        except ValueError:
+            dst_len = len(dst)
+        if dst_len > WINDOWS_FILENAME_LIMIT:
+            length_note = " [WARN: >255]"
+        elif dst_len > SAFE_FILENAME_LIMIT:
+            length_note = " [WARN: >200]"
+        print(f"- {src.name}")
+        print(f"  -> {dst} {marker}{length_note}")
+        print(
+            "     "
+            f"title={reason['title']} | title_len={reason['title_len']} | "
+            f"author={reason['author']} | year={reason['year']} | name_len={reason['name_len']}"
+        )
+
+
+def render_rich_tui_preview(plans: list[RenamePlan]) -> None:
+    from rich.console import Console
+    from rich.table import Table
+
+    table = Table(title="Rename Preview")
+    table.add_column("Current", style="cyan")
+    table.add_column("Target", style="green")
+    table.add_column("Title Len", justify="right")
+    table.add_column("Name Len", justify="right")
+    table.add_column("Note", style="yellow")
+
+    for item in plans:
+        note = ""
+        try:
+            dst_len = int(item.reason["name_len"])
+        except ValueError:
+            dst_len = len(item.dst)
+        if dst_len > WINDOWS_FILENAME_LIMIT:
+            note = ">255"
+        elif dst_len > SAFE_FILENAME_LIMIT:
+            note = ">200"
+        elif item.src.name == item.dst:
+            note = "same"
+        table.add_row(
+            item.src.name,
+            item.dst,
+            item.reason["title_len"],
+            item.reason["name_len"],
+            note,
+        )
+
+    Console().print(table)
+
+
+def render_textual_tui_preview(plans: list[RenamePlan]) -> None:
+    from textual.app import App, ComposeResult
+    from textual.widgets import DataTable, Footer, Header
+
+    class PreviewApp(App):
+        CSS = "DataTable { height: 1fr; }"
+        BINDINGS = [("q", "quit", "Quit")]
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            yield DataTable()
+            yield Footer()
+
+        def on_mount(self) -> None:
+            table = self.query_one(DataTable)
+            table.cursor_type = "row"
+            table.add_columns("Current", "Target", "Title Len", "Name Len", "Note")
+            for item in plans:
+                note = ""
+                try:
+                    dst_len = int(item.reason["name_len"])
+                except ValueError:
+                    dst_len = len(item.dst)
+                if dst_len > WINDOWS_FILENAME_LIMIT:
+                    note = ">255"
+                elif dst_len > SAFE_FILENAME_LIMIT:
+                    note = ">200"
+                elif item.src.name == item.dst:
+                    note = "same"
+                table.add_row(
+                    item.src.name,
+                    item.dst,
+                    item.reason["title_len"],
+                    item.reason["name_len"],
+                    note,
+                )
+
+    PreviewApp().run()
+
+
+def run_qt_gui_workflow(initial_dir: Path, backend: str, app_title: str, app_icon: str | None) -> int:
+    if backend == "PySide6":
+        from PySide6.QtCore import Qt, QUrl
+        from PySide6.QtGui import QDesktopServices, QIcon
+        from PySide6.QtWidgets import (
+            QApplication,
+            QComboBox,
+            QFileDialog,
+            QHBoxLayout,
+            QLabel,
+            QLineEdit,
+            QMainWindow,
+            QMessageBox,
+            QPushButton,
+            QTableWidget,
+            QTableWidgetItem,
+            QVBoxLayout,
+            QWidget,
+        )
+    else:
+        from PyQt6.QtCore import Qt, QUrl
+        from PyQt6.QtGui import QDesktopServices, QIcon
+        from PyQt6.QtWidgets import (
+            QApplication,
+            QComboBox,
+            QFileDialog,
+            QHBoxLayout,
+            QLabel,
+            QLineEdit,
+            QMainWindow,
+            QMessageBox,
+            QPushButton,
+            QTableWidget,
+            QTableWidgetItem,
+            QVBoxLayout,
+            QWidget,
+        )
+
+    all_packs = load_language_packs()
+    fallback_pack = all_packs.get(DEFAULT_LANG, {})
+
+    class MainWindow(QMainWindow):
+        def __init__(self) -> None:
+            super().__init__()
+            if app_icon and Path(app_icon).exists():
+                self.setWindowIcon(QIcon(str(Path(app_icon).resolve())))
+
+            self.current_dir: Path | None = None
+            self.row_sources: list[Path] = []
+            self.repo_url = GITHUB_URL
+            self.packs = all_packs
+            self.cfg = load_user_config()
+            self.lang_code = self.resolve_initial_lang()
+            self.folder_label: QLabel | None = None
+
+            container = QWidget()
+            root = QVBoxLayout(container)
+            self.setCentralWidget(container)
+
+            help_menu = self.menuBar().addMenu("Help")
+            self.help_menu = help_menu
+            self.about_action = help_menu.addAction("About")
+            self.about_action.triggered.connect(self.show_about)
+
+            top = QHBoxLayout()
+            self.folder_label = QLabel("Folder:")
+            top.addWidget(self.folder_label)
+            self.dir_input = QLineEdit()
+            self.dir_input.setReadOnly(True)
+            top.addWidget(self.dir_input, 1)
+            self.lang_label = QLabel("Language:")
+            top.addWidget(self.lang_label)
+            self.lang_combo = QComboBox()
+            for code, display in LANG_DISPLAY_NAMES.items():
+                self.lang_combo.addItem(display, code)
+            top.addWidget(self.lang_combo)
+            self.choose_btn = QPushButton("Choose Folder")
+            self.rescan_btn = QPushButton("Rescan")
+            top.addWidget(self.choose_btn)
+            top.addWidget(self.rescan_btn)
+            root.addLayout(top)
+
+            self.table = QTableWidget(0, 5)
+            self.table.setHorizontalHeaderLabels(["Current", "Target (Editable)", "Title Len", "Name Len", "Note"])
+            self.table.horizontalHeader().setStretchLastSection(True)
+            root.addWidget(self.table, 1)
+
+            bottom = QHBoxLayout()
+            self.status = QLabel("Choose a folder to begin.")
+            bottom.addWidget(self.status, 1)
+            self.about_btn = QPushButton("About")
+            bottom.addWidget(self.about_btn)
+            self.apply_btn = QPushButton("Apply Rename")
+            bottom.addWidget(self.apply_btn)
+            root.addLayout(bottom)
+
+            self.choose_btn.clicked.connect(self.choose_folder)
+            self.rescan_btn.clicked.connect(self.rescan)
+            self.apply_btn.clicked.connect(self.apply_rename)
+            self.about_btn.clicked.connect(self.show_about)
+            self.table.itemChanged.connect(self.on_item_changed)
+            self.lang_combo.currentIndexChanged.connect(self.on_language_changed)
+
+            self.set_lang_combo(self.lang_code)
+            self.apply_language(self.lang_code)
+
+            self.resize(1400, 860)
+
+        def t(self, key: str, **kwargs: object) -> str:
+            pack = self.packs.get(self.lang_code, {})
+            template = pack.get(key) or fallback_pack.get(key) or key
+            try:
+                return template.format(**kwargs)
+            except Exception:
+                return template
+
+        def resolve_initial_lang(self) -> str:
+            user_lang = normalize_lang_code(str(self.cfg.get("lang", "")))
+            if user_lang in self.packs:
+                return user_lang
+            sys_lang = detect_system_language()
+            if sys_lang in self.packs:
+                return sys_lang
+            return DEFAULT_LANG
+
+        def set_lang_combo(self, lang_code: str) -> None:
+            idx = self.lang_combo.findData(lang_code)
+            if idx >= 0:
+                self.lang_combo.blockSignals(True)
+                self.lang_combo.setCurrentIndex(idx)
+                self.lang_combo.blockSignals(False)
+
+        def note_text(self, code: str) -> str:
+            if code == "same":
+                return self.t("note_same")
+            return code
+
+        def apply_language(self, lang_code: str) -> None:
+            self.lang_code = lang_code
+            self.setWindowTitle(self.t("window_title", app_title=app_title))
+            self.help_menu.setTitle(self.t("menu_help"))
+            self.about_action.setText(self.t("menu_about"))
+            if self.folder_label:
+                self.folder_label.setText(self.t("label_folder"))
+            self.lang_label.setText(self.t("label_language"))
+            self.choose_btn.setText(self.t("button_choose_folder"))
+            self.rescan_btn.setText(self.t("button_rescan"))
+            self.about_btn.setText(self.t("button_about"))
+            self.apply_btn.setText(self.t("button_apply"))
+            self.table.setHorizontalHeaderLabels(
+                [
+                    self.t("table_current"),
+                    self.t("table_target"),
+                    self.t("table_title_len"),
+                    self.t("table_name_len"),
+                    self.t("table_note"),
+                ]
+            )
+            if not self.current_dir:
+                self.status.setText(self.t("status_choose_folder"))
+            self.refresh_table_notes_and_lengths()
+
+        def refresh_table_notes_and_lengths(self) -> None:
+            if self.table.rowCount() == 0:
+                return
+            self.table.blockSignals(True)
+            for row in range(self.table.rowCount()):
+                dst_item = self.table.item(row, 1)
+                if not dst_item:
+                    continue
+                dst = (dst_item.text() or "").strip()
+                self.table.item(row, 2).setText(str(calc_title_len_from_target(dst)))
+                self.table.item(row, 3).setText(str(len(dst)))
+                same = self.row_sources[row].name == dst if row < len(self.row_sources) else False
+                note_code = calc_length_note(len(dst), same)
+                self.table.item(row, 4).setText(self.note_text(note_code))
+            self.table.blockSignals(False)
+
+        def choose_folder(self) -> None:
+            start = str(self.current_dir or initial_dir)
+            selected = QFileDialog.getExistingDirectory(self, self.t("dialog_folder_select_title"), start)
+            if not selected:
+                return
+            self.load_directory(Path(selected))
+
+        def show_about(self) -> None:
+            msg = QMessageBox(self)
+            msg.setWindowTitle(self.t("dialog_about_title"))
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setText(
+                self.t(
+                    "about_text",
+                    app_title=app_title,
+                    version=APP_VERSION,
+                    repo_url=self.repo_url,
+                )
+            )
+            open_btn = msg.addButton(self.t("about_open_github"), QMessageBox.ButtonRole.ActionRole)
+            msg.addButton(self.t("dialog_close"), QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+            if msg.clickedButton() == open_btn:
+                QDesktopServices.openUrl(QUrl(self.repo_url))
+
+        def rescan(self) -> None:
+            if self.current_dir is None:
+                self.choose_folder()
+                return
+            self.load_directory(self.current_dir)
+
+        def load_directory(self, folder: Path) -> None:
+            if not folder.exists() or not folder.is_dir():
+                QMessageBox.warning(self, self.t("dialog_invalid_folder_title"), self.t("dialog_invalid_folder_body", path=folder))
+                return
+            self.current_dir = folder
+            self.dir_input.setText(str(folder))
+
+            plans = build_plans_for_directory(folder)
+            if not plans:
+                self.table.blockSignals(True)
+                self.table.setRowCount(0)
+                self.table.blockSignals(False)
+                self.row_sources = []
+                self.status.setText(self.t("status_no_files"))
+                return
+
+            self.table.blockSignals(True)
+            self.table.setRowCount(len(plans))
+            self.row_sources = []
+            for row, plan in enumerate(plans):
+                self.row_sources.append(plan.src)
+
+                src_item = QTableWidgetItem(plan.src.name)
+                src_item.setFlags(src_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.table.setItem(row, 0, src_item)
+
+                dst_item = QTableWidgetItem(plan.dst)
+                dst_item.setFlags(dst_item.flags() | Qt.ItemFlag.ItemIsEditable)
+                self.table.setItem(row, 1, dst_item)
+
+                self.table.setItem(row, 2, QTableWidgetItem(str(calc_title_len_from_target(plan.dst))))
+                self.table.setItem(row, 3, QTableWidgetItem(str(len(plan.dst))))
+                note_code = calc_length_note(len(plan.dst), plan.src.name == plan.dst)
+                self.table.setItem(row, 4, QTableWidgetItem(self.note_text(note_code)))
+            self.table.blockSignals(False)
+            self.table.resizeColumnsToContents()
+            self.status.setText(self.t("status_loaded", count=len(plans)))
+
+        def on_item_changed(self, item: QTableWidgetItem) -> None:
+            if item.column() != 1:
+                return
+            row = item.row()
+            dst = (item.text() or "").strip()
+            self.table.blockSignals(True)
+            self.table.item(row, 2).setText(str(calc_title_len_from_target(dst)))
+            self.table.item(row, 3).setText(str(len(dst)))
+            same = self.row_sources[row].name == dst if row < len(self.row_sources) else False
+            note_code = calc_length_note(len(dst), same)
+            self.table.item(row, 4).setText(self.note_text(note_code))
+            self.table.blockSignals(False)
+
+        def on_language_changed(self, _: int) -> None:
+            code = str(self.lang_combo.currentData() or DEFAULT_LANG)
+            if code not in self.packs:
+                code = DEFAULT_LANG
+            self.cfg["lang"] = code
+            save_user_config(self.cfg)
+            self.apply_language(code)
+
+        def collect_pairs(self) -> tuple[list[tuple[Path, str]], str | None]:
+            if self.current_dir is None:
+                return [], self.t("error_no_folder_selected")
+            pairs: list[tuple[Path, str]] = []
+            seen: set[str] = set()
+            for row, src in enumerate(self.row_sources):
+                dst_item = self.table.item(row, 1)
+                dst_name = (dst_item.text() if dst_item else "").strip()
+                err_code = validate_target_filename(dst_name)
+                if err_code:
+                    return [], self.t("error_row_message", row=row + 1, message=self.t(f"error_{err_code}"))
+                key = dst_name.casefold()
+                if key in seen:
+                    return [], self.t("error_row_duplicate", row=row + 1, name=dst_name)
+                seen.add(key)
+                pairs.append((src, dst_name))
+            return pairs, None
+
+        def apply_rename(self) -> None:
+            pairs, err = self.collect_pairs()
+            if err:
+                QMessageBox.warning(self, self.t("dialog_invalid_targets_title"), err)
+                return
+            if not pairs:
+                QMessageBox.information(self, self.t("dialog_noop_title"), self.t("dialog_noop_body"))
+                return
+
+            changed, apply_err = apply_rename_pairs(pairs)
+            if apply_err:
+                QMessageBox.critical(self, self.t("dialog_rename_failed_title"), apply_err)
+                return
+            QMessageBox.information(self, self.t("dialog_done_title"), self.t("dialog_done_body", count=changed))
+            if self.current_dir:
+                self.load_directory(self.current_dir)
+
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    win.status.setText(win.t("status_choose_folder"))
+
+    app.exec()
+    return 0
+
+
+def render_tk_gui_preview(plans: list[RenamePlan]) -> None:
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.title("Rename Preview")
+    root.geometry("1280x720")
+
+    columns = ("current", "target", "title_len", "name_len", "note")
+    tree = ttk.Treeview(root, columns=columns, show="headings")
+    for c, t, w in [
+        ("current", "Current", 420),
+        ("target", "Target", 500),
+        ("title_len", "Title Len", 90),
+        ("name_len", "Name Len", 90),
+        ("note", "Note", 120),
+    ]:
+        tree.heading(c, text=t)
+        tree.column(c, width=w, anchor="w")
+
+    scrollbar_y = ttk.Scrollbar(root, orient="vertical", command=tree.yview)
+    scrollbar_x = ttk.Scrollbar(root, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+
+    for item in plans:
+        try:
+            dst_len = int(item.reason["name_len"])
+        except ValueError:
+            dst_len = len(item.dst)
+        note = ""
+        if dst_len > WINDOWS_FILENAME_LIMIT:
+            note = ">255"
+        elif dst_len > SAFE_FILENAME_LIMIT:
+            note = ">200"
+        elif item.src.name == item.dst:
+            note = "same"
+        tree.insert("", "end", values=(item.src.name, item.dst, item.reason["title_len"], item.reason["name_len"], note))
+
+    tree.pack(fill="both", expand=True, side="top")
+    scrollbar_y.pack(fill="y", side="right")
+    scrollbar_x.pack(fill="x", side="bottom")
+    root.mainloop()
+
+
+def render_preview(plans: list[RenamePlan], ui_mode: str) -> None:
+    if ui_mode == "gui":
+        print("[WARN] GUI mode is handled before preview rendering. Fallback to TUI/CLI preview here.")
+        ui_mode = "tui"
+
+    if ui_mode == "tui":
+        tui_backend = detect_tui_backend(try_install=True)
+        if tui_backend == "textual":
+            render_textual_tui_preview(plans)
+            return
+        if tui_backend == "rich":
+            render_rich_tui_preview(plans)
+            return
+        print("[WARN] No TUI package available. Fallback to CLI preview.")
+        render_cli_preview(plans)
+        return
+
+    if ui_mode == "auto":
+        # GUI auto workflow is handled in main() with Qt.
+        if detect_tui_backend(try_install=False):
+            render_preview(plans, "tui")
+            return
+        render_cli_preview(plans)
+        return
+
+    render_cli_preview(plans)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Preview/apply ebook renaming by metadata")
+    parser.add_argument("--dir", default=".", help="Target directory (default: current dir)")
+    parser.add_argument("--apply", action="store_true", help="Apply rename. Default is preview only")
+    parser.add_argument("--gui", action="store_true", help="Preview with best available GUI backend")
+    parser.add_argument("--tui", action="store_true", help="Preview with best available TUI backend")
+    parser.add_argument("--app-title", default="Ebook Renamer", help="GUI app window title")
+    parser.add_argument("--app-icon", default="", help="GUI app icon path (.ico/.icns/.png)")
+    parser.add_argument(
+        "--ui",
+        choices=["auto", "cli", "gui", "tui"],
+        default="auto",
+        help="Preview UI mode (default: auto)",
+    )
+    args = parser.parse_args()
+
+    if args.gui and args.tui:
+        print("[ERROR] --gui and --tui cannot be used together.")
+        return 1
+    if args.gui:
+        args.ui = "gui"
+    elif args.tui:
+        args.ui = "tui"
+
+    if args.ui in {"gui", "auto"}:
+        if can_show_gui():
+            gui_backend = detect_gui_backend(try_install=(args.ui == "gui"))
+            if gui_backend in {"PySide6", "PyQt6"}:
+                if args.apply:
+                    print("[INFO] --apply is ignored in GUI mode; use the Apply button in the window.")
+                start_dir = Path(args.dir).resolve() if Path(args.dir).exists() else Path.home()
+                try:
+                    return run_qt_gui_workflow(
+                        initial_dir=start_dir,
+                        backend=gui_backend,
+                        app_title=args.app_title,
+                        app_icon=args.app_icon or None,
+                    )
+                except Exception as e:
+                    print(f"[WARN] Failed to launch GUI workflow: {e}. Falling back to TUI/CLI.")
+            if args.ui == "gui":
+                print("[WARN] No Qt GUI backend available. Falling back to TUI/CLI.")
+        elif args.ui == "gui":
+            print("[WARN] GUI environment not detected. Falling back to TUI/CLI.")
+
+    target = Path(args.dir).resolve()
+    if not target.exists() or not target.is_dir():
+        print(f"[ERROR] Invalid directory: {target}")
+        return 1
+
+    plans = build_plans_for_directory(target)
+    if not plans:
+        print("[INFO] No .epub/.pdf files found.")
+        return 0
+
+    render_preview(plans, args.ui)
+
+    if not args.apply:
+        print("\n[INFO] Preview only. Use --apply to rename files.")
+        return 0
+
+    pairs = [(item.src, item.dst) for item in plans]
+    changed, err = apply_rename_pairs(pairs)
+    if err:
+        print(f"[ERROR] Rename failed: {err}")
+        return 1
+    print(f"\n[INFO] Rename complete. Changed {changed} file(s).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

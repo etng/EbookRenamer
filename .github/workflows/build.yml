@@ -1,0 +1,84 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master, main ]
+  pull_request:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+      - name: Build
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --windowed --onefile `
+            --name EbookRenamer `
+            --add-data "locales;locales" `
+            rename_books_by_meta.py
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EbookRenamer-windows
+          path: dist/EbookRenamer.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+          sudo apt-get update
+          sudo apt-get install -y binutils
+      - name: Build
+        run: |
+          pyinstaller --noconfirm --clean --onefile \
+            --name EbookRenamer \
+            --add-data "locales:locales" \
+            rename_books_by_meta.py
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EbookRenamer-linux
+          path: dist/EbookRenamer
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+      - name: Build
+        run: |
+          pyinstaller --noconfirm --clean --windowed --onedir \
+            --name EbookRenamer \
+            --add-data "locales:locales" \
+            rename_books_by_meta.py
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EbookRenamer-macos
+          path: dist/EbookRenamer.app
