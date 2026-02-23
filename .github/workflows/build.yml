@@ -91,6 +91,10 @@ jobs:
     needs: [build-windows, build-linux, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Validate tag format
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -154,6 +158,25 @@ jobs:
 
           python3 -c "import json,pathlib; tag='${TAG}'; version='${VERSION}'; repo='${REPO}'; win='${WIN_ASSET}'; linux='${LINUX_ASSET}'; mac='${MAC_ASSET}'; base=f'https://github.com/{repo}/releases/download/{tag}'; latest={'version':version,'tag':tag,'release_url':f'https://github.com/{repo}/releases/tag/{tag}','assets':{'windows':{'name':win,'url':f'{base}/{win}'},'linux':{'name':linux,'url':f'{base}/{linux}'},'macos':{'name':mac,'url':f'{base}/{mac}'}}}; pathlib.Path('release-assets/latest.json').write_text(json.dumps(latest, ensure_ascii=False, indent=2), encoding='utf-8')"
 
+      - name: Generate changelog
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          PREV_TAG="$(git tag --list 'v*.*.*' --sort=-v:refname | grep -Fxv "$TAG" | head -n1)"
+          NOTES_FILE="release-assets/CHANGELOG.md"
+
+          {
+            echo "## Changelog"
+            echo
+            if [ -n "$PREV_TAG" ]; then
+              echo "Changes since \`$PREV_TAG\`:"
+              echo
+              git log "${PREV_TAG}..${TAG}" --pretty=format:'- %s (%h)'
+            else
+              echo "Initial release."
+            fi
+          } > "$NOTES_FILE"
+
       - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -163,9 +186,10 @@ jobs:
           REPO="${GITHUB_REPOSITORY}"
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release upload "$TAG" release-assets/* --clobber --repo "$REPO"
+            gh release edit "$TAG" --repo "$REPO" --title "$TAG" --notes-file release-assets/CHANGELOG.md
           else
             gh release create "$TAG" release-assets/* \
               --repo "$REPO" \
               --title "$TAG" \
-              --notes "Automated build for $TAG"
+              --notes-file release-assets/CHANGELOG.md
           fi
