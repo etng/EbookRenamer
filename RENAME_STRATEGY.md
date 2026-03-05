@@ -61,6 +61,12 @@
 - 去除非法路径字符和多余空格。
 - 使用下划线连接单词，减少跨平台问题。
 - 对常见版本词做统一缩写，降低长度并保持一致性。
+- 若候选目标名包含可疑字符（乱码、控制字符、异常符号），默认不重命名。
+
+## 默认跳过规则
+- `rfc*.pdf`（例如 `rfc1928.txt.pdf`）默认不重命名。
+- 上述“可疑字符目标名”默认不重命名。
+- 这些文件仍会显示在预览中，可手工勾选后再执行。
 
 ## 缩写规则（已在脚本中应用）
 - `2nd Edition` / `Second Edition` -> `2e`
@@ -96,8 +102,9 @@
 ## 执行流程
 1. 扫描目录 `.epub`/`.pdf`。
 2. 提取元数据并推断 `主标题/主要作者/年份`。
-3. 生成“原名 -> 新名”预览。
-4. 仅当用户确认后，使用 `--apply` 执行重命名。
+3. 计算并更新文件索引（size / mtime_ns / sha256）。
+4. 生成“原名 -> 新名”预览，并给出默认勾选状态。
+5. 仅当用户确认后，对“已选中文件”执行重命名。
 
 ## 预览界面模式
 - 默认 `--ui auto`：自动选择最佳可用界面。
@@ -109,6 +116,7 @@
 - `--ui cli`：强制纯文本预览（适合脚本化和日志场景）。
 
 Textual TUI 中提供底部操作按钮：
+- `Pick`（切换当前行是否参与重命名）
 - `Apply Rename`
 - `Check Update`
 - `Language`
@@ -131,6 +139,7 @@ Textual TUI 中提供底部操作按钮：
 
 说明：
 - GUI 模式下不会使用命令行 `--apply`，请在窗口内点击按钮应用。
+- GUI 会只处理勾选的行。
 - 若目标名非法、重复或与现有文件冲突，会弹窗提示并阻止执行。
 
 ## GUI 标题/图标定制
@@ -159,6 +168,10 @@ Textual TUI 中提供底部操作按钮：
   - macOS: `~/Library/Application Support/ebook-renamer/config.json`
   - Linux: `~/.config/ebook-renamer/config.json`
   - Windows: `%APPDATA%\\ebook-renamer\\config.json`
+- 文件索引路径：
+  - macOS: `~/Library/Application Support/ebook-renamer/file_index.json`
+  - Linux: `~/.config/ebook-renamer/file_index.json`
+  - Windows: `%APPDATA%\\ebook-renamer\\file_index.json`
 
 ## 外部工具处理
 脚本使用外部工具 `pdfinfo` 获取 PDF 元数据，并使用 `pdftotext`（可选 `mutool`）做首页文本补充解析。

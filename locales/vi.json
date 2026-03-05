@@ -3,6 +3,8 @@
   "menu_help": "Trợ giúp",
   "menu_about": "Giới thiệu",
   "menu_check_update": "Kiểm tra cập nhật",
+  "menu_open_file": "Mở tệp",
+  "menu_reveal_file": "Hiện trong thư mục",
   "label_folder": "Thư mục:",
   "label_language": "Ngôn ngữ:",
   "button_choose_folder": "Chọn thư mục",
@@ -19,6 +21,7 @@
   "button_about_short": "Giới thiệu",
   "button_help_short": "Trợ giúp",
   "button_exit_short": "Thoát",
+  "table_pick": "Chọn",
   "table_current": "Tên hiện tại",
   "table_target": "Tên đích (có thể sửa)",
   "table_title_len": "Độ dài tiêu đề",
@@ -53,5 +56,7 @@
   "error_target_empty": "Tên đích đang để trống.",
   "error_target_path_separators": "Tên đích không được chứa ký tự phân tách đường dẫn.",
   "error_target_windows_illegal_chars": "Tên đích chứa ký tự không hợp lệ trên Windows (: * ? \" < > |).",
-  "error_target_invalid_dot": "Tên đích không hợp lệ."
+  "error_target_invalid_dot": "Tên đích không hợp lệ.",
+  "error_open_file_failed": "Không thể mở tệp:\n{path}",
+  "error_open_folder_failed": "Không thể mở thư mục chứa tệp:\n{path}"
 }

@@ -3,6 +3,8 @@
   "menu_help": "帮助",
   "menu_about": "关于",
   "menu_check_update": "检查更新",
+  "menu_open_file": "打开文件",
+  "menu_reveal_file": "在文件夹中显示",
   "label_folder": "目录：",
   "label_language": "语言：",
   "button_choose_folder": "选择目录",
@@ -19,6 +21,7 @@
   "button_about_short": "关于",
   "button_help_short": "帮助",
   "button_exit_short": "退出",
+  "table_pick": "选择",
   "table_current": "当前文件名",
   "table_target": "目标文件名（可编辑）",
   "table_title_len": "标题长度",
@@ -53,5 +56,7 @@
   "error_target_empty": "目标文件名为空。",
   "error_target_path_separators": "目标文件名不能包含路径分隔符。",
   "error_target_windows_illegal_chars": "目标文件名包含 Windows 非法字符（: * ? \" < > |）。",
-  "error_target_invalid_dot": "目标文件名无效。"
+  "error_target_invalid_dot": "目标文件名无效。",
+  "error_open_file_failed": "打开文件失败：\n{path}",
+  "error_open_folder_failed": "打开所在文件夹失败：\n{path}"
 }

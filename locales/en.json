@@ -3,6 +3,8 @@
   "menu_help": "Help",
   "menu_about": "About",
   "menu_check_update": "Check Update",
+  "menu_open_file": "Open File",
+  "menu_reveal_file": "Reveal in Folder",
   "label_folder": "Folder:",
   "label_language": "Language:",
   "button_choose_folder": "Choose Folder",
@@ -19,6 +21,7 @@
   "button_about_short": "About",
   "button_help_short": "Help",
   "button_exit_short": "Exit",
+  "table_pick": "Pick",
   "table_current": "Current",
   "table_target": "Target (Editable)",
   "table_title_len": "Title Len",
@@ -53,5 +56,7 @@
   "error_target_empty": "Target filename is empty.",
   "error_target_path_separators": "Target filename must not contain path separators.",
   "error_target_windows_illegal_chars": "Target filename contains Windows-illegal characters (: * ? \" < > |).",
-  "error_target_invalid_dot": "Target filename is invalid."
+  "error_target_invalid_dot": "Target filename is invalid.",
+  "error_open_file_failed": "Failed to open file:\n{path}",
+  "error_open_folder_failed": "Failed to open containing folder:\n{path}"
 }

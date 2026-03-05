@@ -6,14 +6,21 @@ Rename `.epub` and `.pdf` files using metadata, with preview-first workflow, GUI
 
 - Metadata-based rename for EPUB/PDF.
 - Preview before apply (CLI/TUI/GUI).
+- Selective rename (pick only part of files in GUI/TUI).
+- Conservative defaults:
+  - RFC-like PDF names such as `rfc1928.txt.pdf` are skipped by default.
+  - Suggested target names with suspicious chars are skipped by default.
+- Central text index (`file_index.json`) stores file size/mtime/sha256 for duplicate detection.
 - GUI supports:
   - folder selection,
+  - per-file checkbox selection,
   - editable target names,
   - live filename length indicators,
   - check-for-update action (from `latest.json`),
   - About dialog and GitHub link.
 - Textual TUI supports:
   - preview table,
+  - per-file pick toggle (`Space`),
   - one-click `Apply Rename`,
   - `Check Update`, `Language`, `About`, `Exit` actions.
 - i18n language packs:
@@ -34,6 +41,12 @@ Apply rename:
 
 ```bash
 python3 rename_books_by_meta.py --ui cli --dir . --apply
+```
+
+Rename only a subset in CLI:
+
+```bash
+python3 rename_books_by_meta.py --ui cli --dir . --apply --only "*.epub" --exclude "rfc*.pdf"
 ```
 
 Launch GUI:
@@ -100,3 +113,7 @@ Manual run is still available via `workflow_dispatch`.
 
 - Ebook source files are ignored by `.gitignore` to avoid accidental upload.
 - Locales are under `locales/` and bundled in builds.
+- File index is stored at:
+  - macOS: `~/Library/Application Support/ebook-renamer/file_index.json`
+  - Linux: `~/.config/ebook-renamer/file_index.json`
+  - Windows: `%APPDATA%\\ebook-renamer\\file_index.json`
