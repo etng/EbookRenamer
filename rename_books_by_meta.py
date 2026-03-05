@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import hashlib
 import importlib.util
 import json
 import locale
@@ -13,9 +15,11 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+import unicodedata
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -33,6 +37,8 @@ GITHUB_URL = "https://github.com/etng/ebook-renamer"
 UPDATE_METADATA_URL = "https://github.com/etng/EbookRenamer/releases/latest/download/latest.json"
 APP_CONFIG_DIR_NAME = "ebook-renamer"
 APP_CONFIG_FILE_NAME = "config.json"
+APP_FILE_INDEX_NAME = "file_index.json"
+FILE_INDEX_SCHEMA_VERSION = 1
 
 LANG_DISPLAY_NAMES = {
     "en": "English",
@@ -57,6 +63,8 @@ class RenamePlan:
     src: Path
     dst: str
     reason: dict[str, str]
+    selected: bool = True
+    skip_reason: str | None = None
 
 
 @dataclass
@@ -89,6 +97,10 @@ def get_config_file() -> Path:
     return get_config_dir() / APP_CONFIG_FILE_NAME
 
 
+def get_file_index_file() -> Path:
+    return get_config_dir() / APP_FILE_INDEX_NAME
+
+
 def load_user_config() -> dict:
     cfg_file = get_config_file()
     if not cfg_file.exists():
@@ -104,6 +116,137 @@ def save_user_config(cfg: dict) -> None:
     cfg_dir.mkdir(parents=True, exist_ok=True)
     cfg_file = get_config_file()
     cfg_file.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def hash_file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_file_index(index_file: Path | None = None) -> dict[str, dict[str, int | str]]:
+    path = index_file or get_file_index_file()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    records = payload.get("records", {})
+    if not isinstance(records, dict):
+        return {}
+    clean: dict[str, dict[str, int | str]] = {}
+    for k, v in records.items():
+        if not isinstance(k, str) or not isinstance(v, dict):
+            continue
+        clean[k] = v
+    return clean
+
+
+def save_file_index(records: dict[str, dict[str, int | str]], index_file: Path | None = None) -> bool:
+    path = index_file or get_file_index_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"[WARN] Cannot create index directory: {path.parent} ({e})")
+        return False
+    payload = {
+        "schema": FILE_INDEX_SCHEMA_VERSION,
+        "updated_at": utc_now_iso(),
+        "records": records,
+    }
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception as e:
+        print(f"[WARN] Cannot write file index: {path} ({e})")
+        return False
+
+
+def update_file_index_for_paths(
+    paths: list[Path], index_file: Path | None = None
+) -> dict[str, dict[str, int | str]]:
+    records = load_file_index(index_file)
+    scanned: dict[str, dict[str, int | str]] = {}
+    now = utc_now_iso()
+
+    for file_path in paths:
+        key = str(file_path.resolve())
+        try:
+            st = file_path.stat()
+        except Exception:
+            continue
+
+        size = int(st.st_size)
+        mtime_ns = int(st.st_mtime_ns)
+        prev = records.get(key, {})
+        prev_size = prev.get("size")
+        prev_mtime = prev.get("mtime_ns")
+        prev_hash = prev.get("sha256")
+
+        sha256: str
+        if prev_size == size and prev_mtime == mtime_ns and isinstance(prev_hash, str) and prev_hash:
+            sha256 = prev_hash
+        else:
+            try:
+                sha256 = hash_file_sha256(file_path)
+            except Exception:
+                sha256 = ""
+
+        rec: dict[str, int | str] = {
+            "size": size,
+            "mtime_ns": mtime_ns,
+            "sha256": sha256,
+            "updated_at": now,
+        }
+        records[key] = rec
+        scanned[key] = rec
+
+    save_file_index(records, index_file)
+    return scanned
+
+
+def duplicate_counts_by_sha256(index_records: dict[str, dict[str, int | str]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for rec in index_records.values():
+        sha = rec.get("sha256")
+        if not isinstance(sha, str) or not sha:
+            continue
+        counts[sha] = counts.get(sha, 0) + 1
+    return counts
+
+
+def reveal_in_file_manager(path: Path) -> tuple[bool, str | None]:
+    target = path.resolve()
+    if not target.exists():
+        return False, f"File does not exist: {target}"
+    if sys.platform == "darwin":
+        proc = run(["open", "-R", str(target)])
+        if proc.returncode == 0:
+            return True, None
+        return False, proc.stderr.strip() or "failed to open Finder"
+    if sys.platform.startswith("win"):
+        proc = run(["explorer", f"/select,{target}"])
+        if proc.returncode == 0:
+            return True, None
+        return False, proc.stderr.strip() or "failed to open Explorer"
+
+    # Linux/Unix: best effort fallback to opening parent directory.
+    parent = target.parent
+    if shutil.which("xdg-open"):
+        proc = run(["xdg-open", str(parent)])
+        if proc.returncode == 0:
+            return True, None
+        return False, proc.stderr.strip() or "failed to open file manager"
+    return False, "No supported file manager opener found (xdg-open missing)"
 
 
 def normalize_lang_code(raw: str | None) -> str:
@@ -375,6 +518,29 @@ def normalize_file_token(text: str) -> str:
     value = re.sub(r"\s+", "_", value)
     value = re.sub(r"_+", "_", value).strip("_ .")
     return value or "Unknown"
+
+
+def is_rfc_like_pdf(path: Path) -> bool:
+    if path.suffix.lower() != ".pdf":
+        return False
+    return bool(re.fullmatch(r"rfc\d+(?:[._-].*)?", path.stem, flags=re.IGNORECASE))
+
+
+def contains_suspicious_filename_chars(name: str) -> bool:
+    if any(token in name for token in ("�", "Ã", "Â")):
+        return True
+    allowed_punct = set(" -_.,()[]")
+    for ch in name:
+        if ch in allowed_punct:
+            continue
+        category = unicodedata.category(ch)
+        if category.startswith("L") or category.startswith("N"):
+            continue
+        if category.startswith("M"):
+            continue
+        # Keep file extension separators and avoid symbols/control chars by default.
+        return True
+    return False
 
 
 def abbreviate_title_phrases(title: str) -> str:
@@ -898,6 +1064,24 @@ def calc_length_note(name_len: int, same_name: bool) -> str:
     return ""
 
 
+def plan_note(item: RenamePlan, dst_name: str | None = None) -> str:
+    dst = dst_name if dst_name is not None else item.dst
+    same_name = item.src.name == dst
+    parts: list[str] = []
+    length_note = calc_length_note(len(dst), same_name)
+    if length_note:
+        parts.append(length_note)
+    dup_count = item.reason.get("dup_count", "0")
+    if dup_count.isdigit() and int(dup_count) > 1:
+        parts.append(f"dup({dup_count})")
+    if not item.selected:
+        if item.skip_reason:
+            parts.append(f"skip:{item.skip_reason}")
+        else:
+            parts.append("skip")
+    return ",".join(parts)
+
+
 def validate_target_filename(name: str) -> str | None:
     value = name.strip()
     if not value:
@@ -911,10 +1095,31 @@ def validate_target_filename(name: str) -> str | None:
     return None
 
 
+def apply_plan_selection_filters(
+    plans: list[RenamePlan], only_patterns: list[str], exclude_patterns: list[str]
+) -> None:
+    if not only_patterns and not exclude_patterns:
+        return
+    for item in plans:
+        name = item.src.name
+        if only_patterns and not any(fnmatch.fnmatch(name, p) for p in only_patterns):
+            item.selected = False
+            if not item.skip_reason:
+                item.skip_reason = "not_selected"
+            continue
+        if exclude_patterns and any(fnmatch.fnmatch(name, p) for p in exclude_patterns):
+            item.selected = False
+            if not item.skip_reason:
+                item.skip_reason = "excluded"
+
+
 def build_plans_for_directory(target: Path, options: ScanOptions | None = None) -> list[RenamePlan]:
     plans: list[RenamePlan] = []
+    files = list(collect_files(target))
+    index_records = update_file_index_for_paths(files)
+    dup_counts = duplicate_counts_by_sha256(index_records)
     reserved_targets: set[str] = set()
-    for file_path in collect_files(target):
+    for file_path in files:
         try:
             if file_path.suffix.lower() == ".pdf":
                 meta = parse_pdf_meta(file_path, options)
@@ -929,8 +1134,46 @@ def build_plans_for_directory(target: Path, options: ScanOptions | None = None) 
             final_name = desired
         else:
             final_name = unique_name_with_reserved(target, desired, reserved_targets)
+        plan_selected = True
+        skip_reason: str | None = None
+        if is_rfc_like_pdf(file_path):
+            plan_selected = False
+            skip_reason = "rfc_like"
+            final_name = file_path.name
+        elif contains_suspicious_filename_chars(final_name):
+            plan_selected = False
+            skip_reason = "weird_chars"
+            final_name = file_path.name
+
+        idx_key = str(file_path.resolve())
+        rec = index_records.get(idx_key, {})
+        size_val = rec.get("size", "")
+        mtime_val = rec.get("mtime_ns", "")
+        sha = rec.get("sha256", "")
+        if isinstance(size_val, int):
+            reason["size"] = str(size_val)
+        if isinstance(mtime_val, int):
+            reason["mtime_ns"] = str(mtime_val)
+        if isinstance(sha, str):
+            reason["sha256"] = sha
+            reason["sha256_short"] = sha[:12] if sha else ""
+            reason["dup_count"] = str(dup_counts.get(sha, 0)) if sha else "0"
+        else:
+            reason["dup_count"] = "0"
+
+        if skip_reason:
+            reason["skip_reason"] = skip_reason
+
         reserved_targets.add(final_name.casefold())
-        plans.append(RenamePlan(src=file_path, dst=final_name, reason=reason))
+        plans.append(
+            RenamePlan(
+                src=file_path,
+                dst=final_name,
+                reason=reason,
+                selected=plan_selected,
+                skip_reason=skip_reason,
+            )
+        )
     return plans
 
 
@@ -986,22 +1229,16 @@ def render_cli_preview(plans: list[RenamePlan]) -> None:
         src = item.src
         dst = item.dst
         reason = item.reason
-        marker = "(same)" if src.name == dst else ""
-        length_note = ""
-        try:
-            dst_len = int(reason["name_len"])
-        except ValueError:
-            dst_len = len(dst)
-        if dst_len > WINDOWS_FILENAME_LIMIT:
-            length_note = " [WARN: >255]"
-        elif dst_len > SAFE_FILENAME_LIMIT:
-            length_note = " [WARN: >200]"
+        marker = "[x]" if item.selected else "[ ]"
+        note = plan_note(item)
+        note_text = f" [NOTE: {note}]" if note else ""
         print(f"- {src.name}")
-        print(f"  -> {dst} {marker}{length_note}")
+        print(f"  -> {dst} {marker}{note_text}")
         print(
             "     "
             f"title={reason['title']} | title_len={reason['title_len']} | "
-            f"author={reason['author']} | year={reason['year']} | name_len={reason['name_len']}"
+            f"author={reason['author']} | year={reason['year']} | name_len={reason['name_len']} | "
+            f"sha256={reason.get('sha256_short', '')}"
         )
 
 
@@ -1010,6 +1247,7 @@ def render_rich_tui_preview(plans: list[RenamePlan]) -> None:
     from rich.table import Table
 
     table = Table(title="Rename Preview")
+    table.add_column("Pick", justify="center")
     table.add_column("Current", style="cyan")
     table.add_column("Target", style="green")
     table.add_column("Title Len", justify="right")
@@ -1017,18 +1255,9 @@ def render_rich_tui_preview(plans: list[RenamePlan]) -> None:
     table.add_column("Note", style="yellow")
 
     for item in plans:
-        note = ""
-        try:
-            dst_len = int(item.reason["name_len"])
-        except ValueError:
-            dst_len = len(item.dst)
-        if dst_len > WINDOWS_FILENAME_LIMIT:
-            note = ">255"
-        elif dst_len > SAFE_FILENAME_LIMIT:
-            note = ">200"
-        elif item.src.name == item.dst:
-            note = "same"
+        note = plan_note(item)
         table.add_row(
+            "Y" if item.selected else "N",
             item.src.name,
             item.dst,
             item.reason["title_len"],
@@ -1094,6 +1323,7 @@ def render_textual_tui_preview(
         """
         BINDINGS = [
             ("f", "choose_folder", "Folder"),
+            ("space", "toggle_pick", "Pick"),
             ("e", "edit_target", "Edit"),
             ("a", "apply_rename", "Apply"),
             ("u", "check_update", "Update"),
@@ -1110,6 +1340,7 @@ def render_textual_tui_preview(
             self.lang_code = self.resolve_initial_lang()
             self.current_dir = current_dir
             self.plans = list(plans)
+            self.selected = [item.selected for item in self.plans]
             self.working_targets = [item.dst for item in self.plans]
             self.editing_row = 0
             self.folder_candidate: Path | None = None
@@ -1146,6 +1377,7 @@ def render_textual_tui_preview(
             yield DataTable(id="table")
             with Horizontal(id="actions"):
                 yield Button("", id="folder")
+                yield Button("", id="toggle_pick")
                 yield Button("", id="edit_target")
                 yield Button("", id="apply")
                 yield Button("", id="check_update")
@@ -1182,6 +1414,7 @@ def render_textual_tui_preview(
             table.clear(columns=True)
             table.cursor_type = "row"
             table.add_columns(
+                self.t("table_pick"),
                 self.t("table_current"),
                 self.t("table_target"),
                 self.t("table_title_len"),
@@ -1189,19 +1422,11 @@ def render_textual_tui_preview(
                 self.t("table_note"),
             )
             for idx, item in enumerate(self.plans):
+                item.selected = self.selected[idx]
                 dst_name = self.working_targets[idx]
-                note = ""
-                try:
-                    dst_len = len(dst_name)
-                except ValueError:
-                    dst_len = len(dst_name)
-                if dst_len > WINDOWS_FILENAME_LIMIT:
-                    note = ">255"
-                elif dst_len > SAFE_FILENAME_LIMIT:
-                    note = ">200"
-                elif item.src.name == dst_name:
-                    note = self.t("note_same")
+                note = plan_note(item, dst_name)
                 table.add_row(
+                    "Y" if self.selected[idx] else "N",
                     item.src.name,
                     dst_name,
                     str(calc_title_len_from_target(dst_name)),
@@ -1210,7 +1435,7 @@ def render_textual_tui_preview(
                 )
             if table.row_count > 0:
                 safe_row = min(max(current_row, 0), table.row_count - 1)
-                table.move_cursor(row=safe_row, column=1)
+                table.move_cursor(row=safe_row, column=2)
 
         def show_message(self, title: str, message: str) -> None:
             self.query_one("#message_title", Static).update(title)
@@ -1357,7 +1582,11 @@ def render_textual_tui_preview(
                 return
             # Prevent duplicate targets inside current preview set.
             for idx, value in enumerate(self.working_targets):
-                if idx != self.editing_row and value.casefold() == new_value.casefold():
+                if idx == self.editing_row:
+                    continue
+                if not self.selected[idx]:
+                    continue
+                if value.casefold() == new_value.casefold():
                     self.show_message(
                         self.t("dialog_invalid_targets_title"),
                         self.t("error_row_duplicate", row=self.editing_row + 1, name=new_value),
@@ -1374,6 +1603,7 @@ def render_textual_tui_preview(
             new_plans = build_plans_for_directory(path, scan_options)
             self.current_dir = path
             self.plans = new_plans
+            self.selected = [item.selected for item in self.plans]
             self.working_targets = [item.dst for item in self.plans]
             self.hide_folder_overlay()
             self.refresh_table()
@@ -1396,6 +1626,7 @@ def render_textual_tui_preview(
             self.query_one("#title", Static).update(self.t("window_title", app_title=app_title))
             self.query_one("#path", Static).update(str(self.current_dir))
             self.query_one("#folder", Button).label = with_shortcut("F", short("button_folder_short", self.t("button_choose_folder")))
+            self.query_one("#toggle_pick", Button).label = "SPC Pick"
             self.query_one("#edit_target", Button).label = with_shortcut("E", short("button_edit_short", self.t("button_edit_target")))
             self.query_one("#apply", Button).label = with_shortcut("A", short("button_apply_short", self.t("button_apply")))
             self.query_one("#check_update", Button).label = with_shortcut("U", short("button_update_short", self.t("button_check_update")))
@@ -1421,6 +1652,8 @@ def render_textual_tui_preview(
             pairs: list[tuple[Path, str]] = []
             seen: set[str] = set()
             for idx, item in enumerate(self.plans):
+                if not self.selected[idx]:
+                    continue
                 dst_name = self.working_targets[idx].strip()
                 err_code = validate_target_filename(dst_name)
                 if err_code:
@@ -1436,6 +1669,9 @@ def render_textual_tui_preview(
             pairs, err_msg = self.collect_pairs()
             if err_msg:
                 self.show_message(self.t("dialog_invalid_targets_title"), err_msg)
+                return
+            if not pairs:
+                self.show_message(self.t("dialog_noop_title"), self.t("dialog_noop_body"))
                 return
             changed, err = apply_rename_pairs(pairs)
             if err:
@@ -1472,6 +1708,15 @@ def render_textual_tui_preview(
             self.refresh_table()
             self.refresh_texts()
 
+        def do_toggle_pick(self) -> None:
+            table = self.query_one("#table", DataTable)
+            if table.row_count == 0:
+                return
+            row = min(max(table.cursor_row, 0), table.row_count - 1)
+            self.selected[row] = not self.selected[row]
+            self.refresh_table()
+            table.move_cursor(row=row, column=2)
+
         def on_button_pressed(self, event: Button.Pressed) -> None:
             if event.button.id == "message_ok":
                 self.hide_message()
@@ -1493,6 +1738,9 @@ def render_textual_tui_preview(
                 return
             if event.button.id == "folder":
                 self.show_folder_overlay()
+                return
+            if event.button.id == "toggle_pick":
+                self.do_toggle_pick()
                 return
             if event.button.id == "edit_target":
                 self.show_edit_overlay()
@@ -1541,6 +1789,9 @@ def render_textual_tui_preview(
         def action_choose_folder(self) -> None:
             self.show_folder_overlay()
 
+        def action_toggle_pick(self) -> None:
+            self.do_toggle_pick()
+
         def action_apply_rename(self) -> None:
             self.do_apply()
 
@@ -1582,6 +1833,7 @@ def run_qt_gui_workflow(
             QLabel,
             QLineEdit,
             QMainWindow,
+            QMenu,
             QMessageBox,
             QPushButton,
             QTableWidget,
@@ -1600,6 +1852,7 @@ def run_qt_gui_workflow(
             QLabel,
             QLineEdit,
             QMainWindow,
+            QMenu,
             QMessageBox,
             QPushButton,
             QTableWidget,
@@ -1619,6 +1872,8 @@ def run_qt_gui_workflow(
 
             self.current_dir: Path | None = None
             self.row_sources: list[Path] = []
+            self.row_reasons: list[dict[str, str]] = []
+            self.row_skip_reasons: list[str | None] = []
             self.repo_url = GITHUB_URL
             self.update_url = update_url
             self.scan_options = scan_options
@@ -1656,9 +1911,10 @@ def run_qt_gui_workflow(
             top.addWidget(self.rescan_btn)
             root.addLayout(top)
 
-            self.table = QTableWidget(0, 5)
-            self.table.setHorizontalHeaderLabels(["Current", "Target (Editable)", "Title Len", "Name Len", "Note"])
+            self.table = QTableWidget(0, 6)
+            self.table.setHorizontalHeaderLabels(["Pick", "Current", "Target (Editable)", "Title Len", "Name Len", "Note"])
             self.table.horizontalHeader().setStretchLastSection(True)
+            self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             root.addWidget(self.table, 1)
 
             bottom = QHBoxLayout()
@@ -1678,6 +1934,7 @@ def run_qt_gui_workflow(
             self.about_btn.clicked.connect(self.show_about)
             self.check_update_btn.clicked.connect(self.check_update)
             self.table.itemChanged.connect(self.on_item_changed)
+            self.table.customContextMenuRequested.connect(self.show_table_context_menu)
             self.lang_combo.currentIndexChanged.connect(self.on_language_changed)
 
             self.set_lang_combo(self.lang_code)
@@ -1730,6 +1987,7 @@ def run_qt_gui_workflow(
             self.apply_btn.setText(self.t("button_apply"))
             self.table.setHorizontalHeaderLabels(
                 [
+                    self.t("table_pick"),
                     self.t("table_current"),
                     self.t("table_target"),
                     self.t("table_title_len"),
@@ -1746,15 +2004,21 @@ def run_qt_gui_workflow(
                 return
             self.table.blockSignals(True)
             for row in range(self.table.rowCount()):
-                dst_item = self.table.item(row, 1)
+                dst_item = self.table.item(row, 2)
                 if not dst_item:
                     continue
                 dst = (dst_item.text() or "").strip()
-                self.table.item(row, 2).setText(str(calc_title_len_from_target(dst)))
-                self.table.item(row, 3).setText(str(len(dst)))
-                same = self.row_sources[row].name == dst if row < len(self.row_sources) else False
-                note_code = calc_length_note(len(dst), same)
-                self.table.item(row, 4).setText(self.note_text(note_code))
+                self.table.item(row, 3).setText(str(calc_title_len_from_target(dst)))
+                self.table.item(row, 4).setText(str(len(dst)))
+                picked = False
+                pick_item = self.table.item(row, 0)
+                if pick_item:
+                    picked = pick_item.checkState() == Qt.CheckState.Checked
+                src = self.row_sources[row] if row < len(self.row_sources) else Path(dst)
+                reason = self.row_reasons[row] if row < len(self.row_reasons) else {}
+                skip_reason = self.row_skip_reasons[row] if row < len(self.row_skip_reasons) else None
+                note_plan = RenamePlan(src=src, dst=dst, reason=reason, selected=picked, skip_reason=skip_reason)
+                self.table.item(row, 5).setText(self.note_text(plan_note(note_plan, dst)))
             self.table.blockSignals(False)
 
         def choose_folder(self) -> None:
@@ -1763,6 +2027,40 @@ def run_qt_gui_workflow(
             if not selected:
                 return
             self.load_directory(Path(selected))
+
+        def source_path_for_row(self, row: int) -> Path | None:
+            if row < 0 or row >= len(self.row_sources):
+                return None
+            return self.row_sources[row]
+
+        def open_source_file(self, src: Path) -> None:
+            if not src.exists():
+                QMessageBox.warning(self, self.t("dialog_invalid_targets_title"), self.t("dialog_invalid_folder_body", path=src))
+                return
+            ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(src.resolve())))
+            if not ok:
+                QMessageBox.warning(self, self.t("dialog_invalid_targets_title"), self.t("error_open_file_failed", path=src))
+
+        def reveal_source_file(self, src: Path) -> None:
+            ok, err = reveal_in_file_manager(src)
+            if not ok:
+                detail = err or self.t("error_open_folder_failed", path=src)
+                QMessageBox.warning(self, self.t("dialog_invalid_targets_title"), detail)
+
+        def show_table_context_menu(self, pos) -> None:
+            idx = self.table.indexAt(pos)
+            row = idx.row()
+            src = self.source_path_for_row(row)
+            if src is None:
+                return
+            menu = QMenu(self)
+            open_file_action = menu.addAction(self.t("menu_open_file"))
+            reveal_file_action = menu.addAction(self.t("menu_reveal_file"))
+            chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+            if chosen == open_file_action:
+                self.open_source_file(src)
+            elif chosen == reveal_file_action:
+                self.reveal_source_file(src)
 
         def show_about(self) -> None:
             msg = QMessageBox(self)
@@ -1811,42 +2109,59 @@ def run_qt_gui_workflow(
                 self.table.setRowCount(0)
                 self.table.blockSignals(False)
                 self.row_sources = []
+                self.row_reasons = []
+                self.row_skip_reasons = []
                 self.status.setText(self.t("status_no_files"))
                 return
 
             self.table.blockSignals(True)
             self.table.setRowCount(len(plans))
             self.row_sources = []
+            self.row_reasons = []
+            self.row_skip_reasons = []
             for row, plan in enumerate(plans):
                 self.row_sources.append(plan.src)
+                self.row_reasons.append(plan.reason)
+                self.row_skip_reasons.append(plan.skip_reason)
+
+                pick_item = QTableWidgetItem("")
+                pick_item.setFlags((pick_item.flags() | Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEditable)
+                pick_item.setCheckState(Qt.CheckState.Checked if plan.selected else Qt.CheckState.Unchecked)
+                self.table.setItem(row, 0, pick_item)
 
                 src_item = QTableWidgetItem(plan.src.name)
                 src_item.setFlags(src_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.table.setItem(row, 0, src_item)
+                self.table.setItem(row, 1, src_item)
 
                 dst_item = QTableWidgetItem(plan.dst)
                 dst_item.setFlags(dst_item.flags() | Qt.ItemFlag.ItemIsEditable)
-                self.table.setItem(row, 1, dst_item)
+                self.table.setItem(row, 2, dst_item)
 
-                self.table.setItem(row, 2, QTableWidgetItem(str(calc_title_len_from_target(plan.dst))))
-                self.table.setItem(row, 3, QTableWidgetItem(str(len(plan.dst))))
-                note_code = calc_length_note(len(plan.dst), plan.src.name == plan.dst)
-                self.table.setItem(row, 4, QTableWidgetItem(self.note_text(note_code)))
+                self.table.setItem(row, 3, QTableWidgetItem(str(calc_title_len_from_target(plan.dst))))
+                self.table.setItem(row, 4, QTableWidgetItem(str(len(plan.dst))))
+                self.table.setItem(row, 5, QTableWidgetItem(self.note_text(plan_note(plan))))
             self.table.blockSignals(False)
             self.table.resizeColumnsToContents()
             self.status.setText(self.t("status_loaded", count=len(plans)))
 
         def on_item_changed(self, item: QTableWidgetItem) -> None:
-            if item.column() != 1:
+            if item.column() not in {0, 2}:
                 return
             row = item.row()
-            dst = (item.text() or "").strip()
+            dst_item = self.table.item(row, 2)
+            dst = (dst_item.text() or "").strip() if dst_item else ""
             self.table.blockSignals(True)
-            self.table.item(row, 2).setText(str(calc_title_len_from_target(dst)))
-            self.table.item(row, 3).setText(str(len(dst)))
-            same = self.row_sources[row].name == dst if row < len(self.row_sources) else False
-            note_code = calc_length_note(len(dst), same)
-            self.table.item(row, 4).setText(self.note_text(note_code))
+            self.table.item(row, 3).setText(str(calc_title_len_from_target(dst)))
+            self.table.item(row, 4).setText(str(len(dst)))
+            picked = False
+            pick_item = self.table.item(row, 0)
+            if pick_item:
+                picked = pick_item.checkState() == Qt.CheckState.Checked
+            src = self.row_sources[row] if row < len(self.row_sources) else Path(dst)
+            reason = self.row_reasons[row] if row < len(self.row_reasons) else {}
+            skip_reason = self.row_skip_reasons[row] if row < len(self.row_skip_reasons) else None
+            note_plan = RenamePlan(src=src, dst=dst, reason=reason, selected=picked, skip_reason=skip_reason)
+            self.table.item(row, 5).setText(self.note_text(plan_note(note_plan, dst)))
             self.table.blockSignals(False)
 
         def on_language_changed(self, _: int) -> None:
@@ -1863,7 +2178,10 @@ def run_qt_gui_workflow(
             pairs: list[tuple[Path, str]] = []
             seen: set[str] = set()
             for row, src in enumerate(self.row_sources):
-                dst_item = self.table.item(row, 1)
+                pick_item = self.table.item(row, 0)
+                if not pick_item or pick_item.checkState() != Qt.CheckState.Checked:
+                    continue
+                dst_item = self.table.item(row, 2)
                 dst_name = (dst_item.text() if dst_item else "").strip()
                 err_code = validate_target_filename(dst_name)
                 if err_code:
@@ -1993,6 +2311,18 @@ def main() -> int:
     parser.add_argument("--allow-ocr", action="store_true", help="Reserved flag: OCR fallback (not implemented yet)")
     parser.add_argument("--allow-online", action="store_true", help="Reserved flag: online metadata lookup (not implemented yet)")
     parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        help="Only include source filenames matching this glob pattern (repeatable)",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Exclude source filenames matching this glob pattern (repeatable)",
+    )
+    parser.add_argument(
         "--ui",
         choices=["auto", "cli", "gui", "tui"],
         default="auto",
@@ -2051,6 +2381,7 @@ def main() -> int:
         return 1
 
     plans = build_plans_for_directory(target, scan_options)
+    apply_plan_selection_filters(plans, args.only, args.exclude)
     if not plans:
         print("[INFO] No .epub/.pdf files found.")
         return 0
@@ -2061,7 +2392,10 @@ def main() -> int:
         print("\n[INFO] Preview only. Use --apply to rename files.")
         return 0
 
-    pairs = [(item.src, item.dst) for item in plans]
+    pairs = [(item.src, item.dst) for item in plans if item.selected]
+    if not pairs:
+        print("\n[INFO] No selected files to rename.")
+        return 0
     changed, err = apply_rename_pairs(pairs)
     if err:
         print(f"[ERROR] Rename failed: {err}")

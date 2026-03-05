@@ -3,6 +3,8 @@
   "menu_help": "說明",
   "menu_about": "關於",
   "menu_check_update": "檢查更新",
+  "menu_open_file": "開啟檔案",
+  "menu_reveal_file": "在資料夾中顯示",
   "label_folder": "資料夾：",
   "label_language": "語言：",
   "button_choose_folder": "選擇資料夾",
@@ -19,6 +21,7 @@
   "button_about_short": "關於",
   "button_help_short": "說明",
   "button_exit_short": "離開",
+  "table_pick": "選取",
   "table_current": "目前檔名",
   "table_target": "目標檔名（可編輯）",
   "table_title_len": "標題長度",
@@ -53,5 +56,7 @@
   "error_target_empty": "目標檔名為空。",
   "error_target_path_separators": "目標檔名不可包含路徑分隔符號。",
   "error_target_windows_illegal_chars": "目標檔名包含 Windows 非法字元（: * ? \" < > |）。",
-  "error_target_invalid_dot": "目標檔名無效。"
+  "error_target_invalid_dot": "目標檔名無效。",
+  "error_open_file_failed": "開啟檔案失敗：\n{path}",
+  "error_open_folder_failed": "開啟所在資料夾失敗：\n{path}"
 }

@@ -1,13 +1,15 @@
 from pathlib import Path
 
+import rename_books_by_meta as rbm
 from rename_books_by_meta import ScanOptions, build_plans_for_directory, render_textual_tui_preview
 
 
-def test_folder_overlay_stays_open_and_can_confirm(tmp_path: Path) -> None:
+def test_folder_overlay_stays_open_and_can_confirm(tmp_path: Path, monkeypatch) -> None:
     dir_a = tmp_path / "a"
     dir_b = tmp_path / "b"
     dir_a.mkdir()
     dir_b.mkdir()
+    monkeypatch.setattr(rbm, "get_file_index_file", lambda: tmp_path / "file_index.json")
 
     # Dummy files are enough; parser failures are handled by fallback naming logic.
     (dir_a / "Alpha_Book-UnknownYear.epub").write_text("x", encoding="utf-8")

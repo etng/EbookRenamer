@@ -3,6 +3,8 @@
   "menu_help": "ヘルプ",
   "menu_about": "このアプリについて",
   "menu_check_update": "更新を確認",
+  "menu_open_file": "ファイルを開く",
+  "menu_reveal_file": "フォルダーで表示",
   "label_folder": "フォルダー：",
   "label_language": "言語：",
   "button_choose_folder": "フォルダー選択",
@@ -19,6 +21,7 @@
   "button_about_short": "情報",
   "button_help_short": "ヘルプ",
   "button_exit_short": "終了",
+  "table_pick": "対象",
   "table_current": "現在のファイル名",
   "table_target": "変更後ファイル名（編集可）",
   "table_title_len": "タイトル長",
@@ -53,5 +56,7 @@
   "error_target_empty": "変更後ファイル名が空です。",
   "error_target_path_separators": "変更後ファイル名にパス区切り文字を含めることはできません。",
   "error_target_windows_illegal_chars": "変更後ファイル名に Windows の禁止文字（: * ? \" < > |）が含まれています。",
-  "error_target_invalid_dot": "変更後ファイル名が無効です。"
+  "error_target_invalid_dot": "変更後ファイル名が無効です。",
+  "error_open_file_failed": "ファイルを開けませんでした：\n{path}",
+  "error_open_folder_failed": "格納フォルダーを開けませんでした：\n{path}"
 }
