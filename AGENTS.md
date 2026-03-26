@@ -54,7 +54,7 @@
 
 ## 7. 测试与验证
 
-- 默认测试命令：`.venv/bin/python -m pytest -q`
+- 默认测试命令：`python3 -m pytest -q`
 - 新增策略必须有单元测试（至少覆盖正常路径 + 边界路径）。
 - 涉及索引文件写入的测试，必须用 `tmp_path` + monkeypatch 重定向索引路径，避免污染真实用户目录。
 
