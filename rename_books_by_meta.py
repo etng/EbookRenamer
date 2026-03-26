@@ -23,12 +23,49 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-NOISE_PATTERNS = [
-    r"z-library",
-    r"1lib",
-    r"z-lib",
-    r"lib\.sk",
-]
+SOURCE_NOISE_RE = re.compile(
+    r"""
+    (?:
+        [\s,._-]*
+        (?:
+            (?<![A-Za-z0-9])z[\W_]*library(?:[\W_]*sk)?(?![A-Za-z0-9])
+            |
+            (?<![A-Za-z0-9])1lib(?:[\W_]*sk)?(?![A-Za-z0-9])
+            |
+            (?<![A-Za-z0-9])z[\W_]*lib(?:[\W_]*sk)?(?![A-Za-z0-9])
+            |
+            (?<![A-Za-z0-9])lib[\W_]*sk(?![A-Za-z0-9])
+        )
+    )+
+    """,
+    flags=re.IGNORECASE | re.VERBOSE,
+)
+DROP_FILENAME_CHARS = {
+    "'",
+    "`",
+    "´",
+    "‘",
+    "’",
+    "‚",
+    "‛",
+    '"',
+    "“",
+    "”",
+    "„",
+    "‟",
+    "‹",
+    "›",
+    "«",
+    "»",
+    "《",
+    "》",
+    "〈",
+    "〉",
+    "「",
+    "」",
+    "『",
+    "』",
+}
 
 WINDOWS_FILENAME_LIMIT = 255
 SAFE_FILENAME_LIMIT = 200
@@ -502,8 +539,7 @@ def extract_year(text: str | None) -> str | None:
 
 def clean_text(text: str) -> str:
     value = text
-    for p in NOISE_PATTERNS:
-        value = re.sub(p, "", value, flags=re.IGNORECASE)
+    value = SOURCE_NOISE_RE.sub("", value)
     # Drop placeholder tokens from legacy filenames.
     value = re.sub(r"\bUnknown(?:Year|Author)\b", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\([^)]*\)", "", value)
@@ -512,9 +548,23 @@ def clean_text(text: str) -> str:
 
 
 def normalize_file_token(text: str) -> str:
-    value = text.strip()
-    value = re.sub(r"[\\/:*?\"<>|]", " ", value)
-    value = re.sub(r"[.,;()\[\]{}]", " ", value)
+    value = unicodedata.normalize("NFKC", text.strip())
+    chars: list[str] = []
+    for ch in value:
+        if ch in DROP_FILENAME_CHARS:
+            continue
+        if ch.isspace() or ch in "\\/:*?\"<>|":
+            chars.append(" ")
+            continue
+        category = unicodedata.category(ch)
+        if category.startswith(("L", "N", "M")):
+            chars.append(ch)
+            continue
+        if category.startswith(("P", "S")):
+            chars.append(" ")
+            continue
+        chars.append(" ")
+    value = "".join(chars)
     value = re.sub(r"\s+", "_", value)
     value = re.sub(r"_+", "_", value).strip("_ .")
     return value or "Unknown"
@@ -527,7 +577,7 @@ def is_rfc_like_pdf(path: Path) -> bool:
 
 
 def contains_suspicious_filename_chars(name: str) -> bool:
-    if any(token in name for token in ("�", "Ã", "Â")):
+    if contains_broken_text(name):
         return True
     allowed_punct = set(" -_.,()[]")
     for ch in name:
@@ -541,6 +591,12 @@ def contains_suspicious_filename_chars(name: str) -> bool:
         # Keep file extension separators and avoid symbols/control chars by default.
         return True
     return False
+
+
+def contains_broken_text(text: str | None) -> bool:
+    if not text:
+        return False
+    return any(token in text for token in ("�", "Ã", "Â"))
 
 
 def abbreviate_title_phrases(title: str) -> str:
@@ -617,6 +673,13 @@ def looks_like_bad_title(title: str | None) -> bool:
         return True
     if re.fullmatch(r"B[0-9A-Z]{9}(?:\s*\(.*\))?", t):
         return True
+    if re.search(r"\bpage\s+[A-Za-z0-9ivxlcdm]+\b", t, flags=re.IGNORECASE):
+        if (
+            re.search(r"\b\d{1,2}:\d{2}\b", t)
+            or re.search(r"\b(?:19|20)\d{2}[/-]\d{1,2}[/-]\d{1,2}\b", t)
+            or "#" in t
+        ):
+            return True
     return False
 
 
@@ -697,7 +760,7 @@ def split_first_author(author_text: str | None) -> str | None:
 def author_from_filename(name_stem: str) -> str | None:
     groups = re.findall(r"\(([^)]{2,})\)", name_stem)
     for g in groups:
-        if re.search(r"z-library|1lib|z-lib|lib\.sk", g, flags=re.IGNORECASE):
+        if SOURCE_NOISE_RE.search(g):
             continue
         raw = g.strip()
         if not raw:
@@ -1139,6 +1202,10 @@ def build_plans_for_directory(target: Path, options: ScanOptions | None = None) 
         if is_rfc_like_pdf(file_path):
             plan_selected = False
             skip_reason = "rfc_like"
+            final_name = file_path.name
+        elif contains_broken_text(reason.get("title")) or contains_broken_text(reason.get("author")):
+            plan_selected = False
+            skip_reason = "weird_chars"
             final_name = file_path.name
         elif contains_suspicious_filename_chars(final_name):
             plan_selected = False

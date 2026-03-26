@@ -7,6 +7,8 @@ Rename `.epub` and `.pdf` files using metadata, with preview-first workflow, GUI
 - Metadata-based rename for EPUB/PDF.
 - Preview before apply (CLI/TUI/GUI).
 - Selective rename (pick only part of files in GUI/TUI).
+- Strips common source-site filename noise such as `z-library`, `z_library_sk`, `1lib_sk`, `z_lib_sk`.
+- Normalizes common full-width/CJK punctuation in suggested names to safer filename separators.
 - Conservative defaults:
   - RFC-like PDF names such as `rfc1928.txt.pdf` are skipped by default.
   - Suggested target names with suspicious chars are skipped by default.
